@@ -1,0 +1,73 @@
+{
+  "name": "vuetify-grid-table",
+  "version": "0.1.3",
+  "description": "Spreadsheet-style editable data grid for Vue 3 + Vuetify. Cell-level focus, keyboard navigation, Excel-compatible copy/paste, drag reorder, and text / number / select / autocomplete / date / checkbox cell editors.",
+  "keywords": [
+    "vue",
+    "vue3",
+    "vuetify",
+    "grid",
+    "data-grid",
+    "datagrid",
+    "table",
+    "spreadsheet",
+    "editable",
+    "excel",
+    "clipboard",
+    "typescript"
+  ],
+  "license": "MIT",
+  "author": "bonv95 <bonguyenvan95@gmail.com>",
+  "homepage": "https://github.com/bonv95/vuetify-grid-table#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bonv95/vuetify-grid-table.git",
+    "directory": "packages/vuetify-grid-table"
+  },
+  "bugs": {
+    "url": "https://github.com/bonv95/vuetify-grid-table/issues"
+  },
+  "type": "module",
+  "sideEffects": [
+    "**/*.css"
+  ],
+  "main": "./dist/vuetify-grid-table.umd.cjs",
+  "module": "./dist/vuetify-grid-table.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/vuetify-grid-table.js",
+      "require": "./dist/vuetify-grid-table.umd.cjs"
+    },
+    "./style.css": "./dist/vuetify-grid-table.css",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "dev": "vite build --watch",
+    "build": "vue-tsc --noEmit -p tsconfig.json && vite build",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.json",
+    "prepublishOnly": "npm run build"
+  },
+  "peerDependencies": {
+    "vue": "^3.3.0",
+    "vuetify": "^3.7.4"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.11",
+    "vite-plugin-dts": "^4.5.0",
+    "vue": "^3.5.13",
+    "vue-tsc": "^2.2.0",
+    "vuetify": "^3.7.4"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "vuetify-grid-table-workspace",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Monorepo for the vuetify-grid-table library and its demo site",
+  "workspaces": [
+    "packages/*",
+    "demo"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace demo",
+    "build": "npm run build --workspace vuetify-grid-table && npm run build --workspace demo",
+    "build:lib": "npm run build --workspace vuetify-grid-table",
+    "build:demo": "npm run build --workspace demo",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "release": "npm run build:lib && npm publish --workspace vuetify-grid-table --access public"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
