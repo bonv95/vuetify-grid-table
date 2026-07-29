@@ -39,11 +39,60 @@ export interface GridColumn {
   headerClass?: string
   /** Set false for a read-only column (still selectable and copyable). */
   editable?: boolean
+  /**
+   * Overrides the icon that advertises this column's editor: any mdi name, or
+   * `false` to show none. Defaults to one picked from `type`.
+   */
+  typeIcon?: string | false
   /** Options for `select` / `autocomplete`. */
   items?: GridOption[]
   /** Overrides the rendered (and copied) text. */
   format?: (value: unknown, row: GridRow) => string
 }
+
+/** What a `cell` / `cell.<key>` slot is handed. */
+export interface GridCellSlotProps {
+  row: GridRow
+  rowIndex: number
+  column: GridColumn
+  colIndex: number
+  /** The stored value, untouched by `format`. */
+  value: unknown
+  /** What the grid would have rendered — also what copy puts on the clipboard. */
+  text: string
+  active: boolean
+  selected: boolean
+  /** False when the table, the row, the column or the cell is read-only. */
+  editable: boolean
+  /** Open this cell's editor, as `F2` would. */
+  edit: () => void
+  /** Write the cell through the usual pipeline: `cell-change` fires, read-only wins. */
+  setValue: (value: GridCellValue) => void
+}
+
+/** What an `editor` / `editor.<key>` slot is handed. */
+export interface GridEditorSlotProps {
+  row: GridRow
+  rowIndex: number
+  column: GridColumn
+  colIndex: number
+  /** The draft being edited — not yet written to the row. */
+  value: GridCellValue
+  /** The keystroke that opened the editor, when typing is what opened it. */
+  initialText: string | undefined
+  /** Replace the draft. */
+  update: (value: GridCellValue) => void
+  /** Write the draft and move on (default: stay put). */
+  commit: (move?: 'down' | 'up' | 'right' | 'left' | 'none') => void
+  /** Abandon the draft. */
+  cancel: () => void
+}
+
+/** Class(es) for a row: fixed, or worked out per row. */
+export type GridRowClass =
+  | string
+  | string[]
+  | ((row: GridRow, index: number) => string | string[] | undefined)
 
 /** Overridable wording for the right-click menu. */
 export interface GridMenuLabels {
@@ -57,6 +106,28 @@ export interface GridCellRef {
   row: number
   col: number
 }
+
+/**
+ * Cell to focus once the grid mounts. `col` accepts a column key as well as an
+ * index, so callers do not have to track column order.
+ */
+export interface GridInitialCell {
+  /** Row index; defaults to the first row. */
+  row?: number
+  /** Column index or `key`; defaults to the first column. */
+  col?: number | string
+}
+
+/** Everything a read-only predicate is told about the cell it is asked about. */
+export interface GridCellContext {
+  row: GridRow
+  rowIndex: number
+  column: GridColumn
+  colIndex: number
+}
+
+/** Rows to lock: a list of indices, or a predicate run per row. */
+export type GridReadonlyRows = number[] | ((row: GridRow, index: number) => boolean)
 
 /** Normalised selection rectangle, inclusive on both corners. */
 export interface GridRange {

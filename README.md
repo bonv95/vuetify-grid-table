@@ -22,8 +22,27 @@ npm install vuetify-grid-table
 <GridTable v-model="rows" :columns="columns" height="480" @cell-change="onChange" />
 ```
 
-Full API — props, events, column types, date shorthand, keyboard map, clipboard
-behaviour — lives in **[packages/vuetify-grid-table/README.md](./packages/vuetify-grid-table/README.md)**,
+## What it does
+
+- **Keyboard first.** Arrows, `Enter`, `Tab`, `F2`, type-to-edit, `Delete`,
+  `Ctrl+A`. `initialCell` + `autofocus` make the grid usable from the first
+  keystroke, with no click anywhere.
+- **Six column types** — text, number, select, autocomplete, date, checkbox —
+  each backed by the matching Vuetify input, each advertising itself with a hint
+  icon so a cell that opens a list or a calendar looks different from one that
+  doesn't.
+- **Excel-compatible clipboard.** Copy, cut and paste rectangular ranges as TSV;
+  a round trip through a spreadsheet is lossless, and a paste that overruns the
+  last row can grow the grid.
+- **Read-only in layers** — table, row, column, cell — so a shipped order can be
+  locked without touching the data or the column config.
+- **Slots** for cell display, the editor, and the gutter, per column or across
+  the table.
+- **Frozen gutter and fixed header**, drag-to-reorder rows, drag-to-resize
+  columns, right-click row menu, date shorthand (`701` → `2026-07-01`).
+
+Full API — props, events, column types, keyboard map, clipboard behaviour —
+lives in **[packages/vuetify-grid-table/README.md](./packages/vuetify-grid-table/README.md)**,
 which is also the npm page.
 
 ## Repository layout
@@ -32,6 +51,12 @@ which is also the npm page.
 packages/vuetify-grid-table/   the published library
 demo/                          the Vercel demo site (private)
 ```
+
+Two READMEs, on purpose:
+[the package one](./packages/vuetify-grid-table/README.md) is the public API as
+an npm consumer sees it, and
+[the component one](./packages/vuetify-grid-table/src/components/grid-table/README.md)
+sits next to the source for anyone editing it — same ground, less marketing.
 
 An npm workspace. The demo imports the library **from source** through a Vite
 alias, so `npm run dev` hot-reloads library edits with no rebuild step, and the

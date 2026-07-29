@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useTheme } from 'vuetify'
-import { GridTable, type GridCellChange, type GridRow } from 'vuetify-grid-table'
+import { GridTable, type GridCellChange, type GridColumn, type GridRow } from 'vuetify-grid-table'
 
 import { columns, createBlankRow, createRows } from './data'
 
@@ -21,8 +21,45 @@ const rows = ref<GridRow[]>(createRows())
 
 const readonly = ref(false)
 const showRowNumbers = ref(true)
+const typeIcons = ref(true)
+const fixedHeader = ref(true)
 const reorderable = ref(true)
-const enterDirection = ref<'down' | 'right'>('down')
+const enterDirection = ref<'down' | 'right'>('right')
+
+/* --- Partial read-only: whole rows, or a single column ----------------------
+ * A row that has already shipped is locked through `readonlyRows`; a column is
+ * locked with its own `editable` flag. Both still select and copy — only
+ * writes are refused. */
+const lockShippedRows = ref(true)
+const lockReferenceColumn = ref(true)
+
+function isShipped(row: GridRow) {
+  return row.status === 'shipped' || row.status === 'invoiced'
+}
+
+const gridColumns = computed<GridColumn[]>(() =>
+  columns.map((column) =>
+    column.key === 'reference' ? { ...column, editable: !lockReferenceColumn.value } : column,
+  ),
+)
+
+const lockedRowCount = computed(() => (lockShippedRows.value ? rows.value.filter(isShipped).length : 0))
+
+/* --- Initial focus ---------------------------------------------------------
+ * The grid below starts on its very first cell — the common case, and what the
+ * defaults here spell out. `initialCell` only applies as the grid mounts, so
+ * the demo bumps a `key` to mount a fresh one instead of pretending the prop is
+ * reactive. */
+const initialRow = ref(1)
+const initialColumn = ref(columns[0].key)
+const gridKey = ref(0)
+
+const columnKeys = computed(() => columns.map((column) => ({ title: column.title, value: column.key })))
+
+function remountGrid() {
+  gridKey.value++
+  push('mdi-target', 'primary', `mounted with focus on row ${initialRow.value} · ${initialColumn.value}`)
+}
 
 /* ------------------------------------------------------------------- events */
 
@@ -93,12 +130,12 @@ const columns: GridColumn[] = [
 <\/template>`
 
 const cellTypes = [
-  { type: 'text', editor: 'v-text-field', stored: 'string', note: 'The default when no type is set.' },
-  { type: 'number', editor: 'v-text-field[number]', stored: 'number | null', note: 'Commas and spaces are stripped on paste.' },
-  { type: 'select', editor: 'v-select', stored: "the option's value", note: 'Menu opens as soon as the editor does.' },
-  { type: 'autocomplete', editor: 'v-autocomplete', stored: "the option's value", note: 'Typing filters; Enter takes the first match.' },
-  { type: 'date', editor: 'v-text-field + v-date-picker', stored: "'YYYY-MM-DD'", note: 'Shorthand: 1, 701, 7/1, 260701 all parse.' },
-  { type: 'checkbox', editor: 'v-checkbox-btn', stored: 'boolean', note: 'Rendered in place; Space toggles it.' },
+  { type: 'text', icon: null, editor: 'v-text-field', stored: 'string', note: 'The default when no type is set.' },
+  { type: 'number', icon: null, editor: 'v-text-field[number]', stored: 'number | null', note: 'Commas and spaces are stripped on paste.' },
+  { type: 'select', icon: 'mdi-menu-down', editor: 'v-select', stored: "the option's value", note: 'Menu opens as soon as the editor does.' },
+  { type: 'autocomplete', icon: 'mdi-magnify', editor: 'v-autocomplete', stored: "the option's value", note: 'Typing filters; Enter takes the first match.' },
+  { type: 'date', icon: 'mdi-calendar-blank-outline', editor: 'v-text-field + v-date-picker', stored: "'YYYY-MM-DD'", note: 'Shorthand: 1, 701, 7/1, 260701 all parse.' },
+  { type: 'checkbox', icon: null, editor: 'v-checkbox-btn', stored: 'boolean', note: 'Rendered in place; Space toggles it.' },
 ]
 
 const shortcuts = [
@@ -199,6 +236,8 @@ const shortcuts = [
           <div class="d-flex flex-wrap align-center ga-4 px-4 py-3">
             <v-switch v-model="readonly" label="Read-only" density="compact" hide-details color="primary" />
             <v-switch v-model="showRowNumbers" label="Row numbers" density="compact" hide-details color="primary" />
+            <v-switch v-model="typeIcons" label="Type icons" density="compact" hide-details color="primary" />
+            <v-switch v-model="fixedHeader" label="Fixed header" density="compact" hide-details color="primary" />
             <v-switch v-model="reorderable" label="Drag to reorder" density="compact" hide-details color="primary" />
             <v-btn-toggle
               v-model="enterDirection"
@@ -214,29 +253,69 @@ const shortcuts = [
 
           <v-divider />
 
-          <v-alert
-            type="info"
-            variant="tonal"
-            density="compact"
-            rounded="0"
-            icon="mdi-cursor-default-click-outline"
-          >
-            Click a cell, then just type. Try
-            <strong>7/1</strong> in a ship date, <kbd class="demo-kbd">⌘/Ctrl</kbd>
-            <kbd class="demo-kbd">C</kbd> a block and paste it into Excel, or right-click a row
-            number.
-          </v-alert>
+          <div class="d-flex flex-wrap align-center ga-4 px-4 py-3">
+            <v-switch
+              v-model="lockShippedRows"
+              label="Lock shipped rows"
+              density="compact"
+              hide-details
+              color="primary"
+            />
+            <v-switch
+              v-model="lockReferenceColumn"
+              label="Lock reference column"
+              density="compact"
+              hide-details
+              color="primary"
+            />
+
+            <v-divider vertical class="my-1" />
+
+            <span class="text-body-2 text-medium-emphasis">Focus on mount</span>
+            <v-text-field
+              v-model.number="initialRow"
+              label="Row"
+              type="number"
+              :min="1"
+              :max="rows.length"
+              density="compact"
+              variant="outlined"
+              hide-details
+              style="max-width: 110px"
+            />
+            <v-select
+              v-model="initialColumn"
+              :items="columnKeys"
+              label="Column"
+              density="compact"
+              variant="outlined"
+              hide-details
+              style="max-width: 180px"
+            />
+            <v-btn size="small" variant="tonal" prepend-icon="mdi-target" @click="remountGrid">
+              Re-mount
+            </v-btn>
+          </div>
+
+          <v-divider />
 
           <GridTable
+            :key="gridKey"
             v-model="rows"
-            :columns="columns"
+            :columns="gridColumns"
             :readonly="readonly"
+            :readonly-rows="lockShippedRows ? isShipped : undefined"
+            :initial-cell="{ row: initialRow - 1, col: initialColumn }"
+            autofocus
             :show-row-numbers="showRowNumbers"
+            :type-icons="typeIcons"
+            :fixed-header="fixedHeader"
             :reorderable="reorderable"
             :enter-direction="enterDirection"
             :create-row="createBlankRow"
             height="440"
             item-key="id"
+            :row-class="(row) => (row.urgent ? 'demo-row-urgent' : undefined)"
             @cell-change="onCellChange"
             @row-move="({ from, to }) => push('mdi-swap-vertical', 'info', `row ${from + 1} → ${to + 1}`)"
             @row-insert="({ index }) => push('mdi-plus', 'success', `row inserted at ${index + 1}`)"
@@ -252,6 +331,10 @@ const shortcuts = [
               <strong>{{ totalAmount.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }) }}</strong>
             </span>
             <span><strong>{{ urgentCount }}</strong> urgent</span>
+            <span v-if="lockedRowCount">
+              <v-icon icon="mdi-lock-outline" size="14" class="mr-1" />
+              <strong>{{ lockedRowCount }}</strong> locked rows
+            </span>
           </div>
         </v-card>
 
@@ -297,6 +380,7 @@ const shortcuts = [
                 <thead>
                   <tr>
                     <th>type</th>
+                    <th>Hint</th>
                     <th>Editor</th>
                     <th>Stored value</th>
                   </tr>
@@ -304,6 +388,10 @@ const shortcuts = [
                 <tbody>
                   <tr v-for="item in cellTypes" :key="item.type">
                     <td><code>{{ item.type }}</code></td>
+                    <td>
+                      <v-icon v-if="item.icon" :icon="item.icon" size="14" class="text-medium-emphasis" />
+                      <span v-else class="text-disabled">—</span>
+                    </td>
                     <td class="text-medium-emphasis">{{ item.editor }}</td>
                     <td>
                       <code>{{ item.stored }}</code>
@@ -363,5 +451,11 @@ const shortcuts = [
 <style scoped>
 .font-monospace {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* Applied through the grid's `rowClass` prop, so it lands on a <tr> inside the
+   child component — hence :deep(). Selection and focus still win over it. */
+:deep(.demo-row-urgent) td {
+  background-color: rgba(var(--v-theme-error), 0.05);
 }
 </style>

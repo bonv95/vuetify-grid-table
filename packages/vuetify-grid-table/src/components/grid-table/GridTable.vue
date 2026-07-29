@@ -6,7 +6,16 @@
 //
 // Everything is index-addressed ({row, col}); `rows` is replaced immutably on
 // every mutation so callers can diff, undo or persist from the v-model alone.
-import { computed, type CSSProperties, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import {
+  computed,
+  type CSSProperties,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  reactive,
+  ref,
+  watch,
+} from 'vue'
 // Imported explicitly rather than relying on global registration: once this
 // package is published, `vite-plugin-vuetify`'s auto-import no longer sees the
 // template, so a consumer tree-shaking Vuetify would get unresolved tags.
@@ -29,11 +38,18 @@ import {
 } from './format.js'
 import type {
   GridCellChange,
+  GridCellContext,
   GridCellRef,
+  GridCellSlotProps,
+  GridCellValue,
   GridColumn,
+  GridEditorSlotProps,
+  GridInitialCell,
   GridMenuLabels,
   GridRange,
+  GridReadonlyRows,
   GridRow,
+  GridRowClass,
 } from './types.js'
 
 const props = withDefaults(
@@ -41,8 +57,13 @@ const props = withDefaults(
     columns: GridColumn[]
     /** Row property used as the render key; falls back to the index. */
     itemKey?: string
-    /** Max height of the scroll area (number = px). Header stays sticky. */
+    /** Max height of the scroll area (number = px). Needed for a fixed header. */
     height?: string | number
+    /**
+     * Freeze the header row while the body scrolls. Needs `height` to have any
+     * effect — without one the grid is as tall as its rows and never scrolls.
+     */
+    fixedHeader?: boolean
     /** Width for columns that do not set their own. */
     defaultColumnWidth?: number
     /** Where Enter goes: the cell below (default) or the next one across. */
@@ -51,18 +72,32 @@ const props = withDefaults(
     headerStyle?: CSSProperties
     /** Class(es) applied to every header cell. */
     headerClass?: string
+    /** Advertise each column's editor with an icon. Per column: `typeIcon`. */
+    typeIcons?: boolean
     /** Right-click menu with insert / delete / copy row. */
     contextMenu?: boolean
     /** Wording for that menu, for apps that are not in English. */
     menuLabels?: Partial<GridMenuLabels>
+    /** Class(es) for every row, or worked out per row. */
+    rowClass?: GridRowClass
     /** Left gutter with row numbers and the drag handle. */
     showRowNumbers?: boolean
+    /** Width of that gutter in px. */
+    gutterWidth?: number
     /** Allow reordering rows by dragging the gutter. */
     reorderable?: boolean
     /** Allow dragging column edges. */
     resizable?: boolean
     /** Block all edits; selection and copy still work. */
     readonly?: boolean
+    /** Lock individual rows: indices, or a predicate run per row. */
+    readonlyRows?: GridReadonlyRows
+    /** Last word on a single cell, checked after the row and column rules. */
+    cellReadonly?: (context: GridCellContext) => boolean
+    /** Cell to focus on mount; `col` accepts a column key or an index. */
+    initialCell?: GridInitialCell | null
+    /** Also take keyboard focus on mount, so typing works without a click. */
+    autofocus?: boolean
     /** Append rows when a paste runs past the last one. */
     growOnPaste?: boolean
     /** Factory for rows created by paste; defaults to blank cells. */
@@ -72,16 +107,24 @@ const props = withDefaults(
   {
     itemKey: 'id',
     height: undefined,
+    fixedHeader: true,
     defaultColumnWidth: 160,
     enterDirection: 'down',
     headerStyle: undefined,
     headerClass: undefined,
+    typeIcons: true,
     contextMenu: true,
     menuLabels: undefined,
+    rowClass: undefined,
     showRowNumbers: true,
+    gutterWidth: 36,
     reorderable: true,
     resizable: true,
     readonly: false,
+    readonlyRows: undefined,
+    cellReadonly: undefined,
+    initialCell: undefined,
+    autofocus: false,
     growOnPaste: true,
     createRow: undefined,
     loading: false,
@@ -97,7 +140,44 @@ const emit = defineEmits<{
   'row-delete': [payload: { from: number; to: number }]
 }>()
 
-const GUTTER_WIDTH = 52
+/**
+ * Render overrides. Each pair is "one column" plus "every column": a
+ * `cell.total` slot wins for that column, `cell` catches the rest, and with
+ * neither the grid renders as it always did.
+ *
+ * There is deliberately no slot for the `<tr>` or the `<td>` themselves — the
+ * grid addresses cells through `[data-cell="row-col"]` and rows through
+ * `tr[data-row]` for selection, scrolling and drag reorder, so handing those
+ * elements to a caller would break navigation in ways nothing would report.
+ * Row-level styling goes through the `rowClass` prop instead.
+ */
+const slots = defineSlots<{
+  /** Shown in place of the row list when there are none. */
+  empty?: () => unknown
+  /** Cell contents, outside of editing. */
+  cell?: (props: GridCellSlotProps) => unknown
+  /** Cell contents for one column. */
+  [key: `cell.${string}`]: ((props: GridCellSlotProps) => unknown) | undefined
+  /** The editor, replacing the built-in one. */
+  editor?: (props: GridEditorSlotProps) => unknown
+  /** The editor for one column. */
+  [key: `editor.${string}`]: ((props: GridEditorSlotProps) => unknown) | undefined
+  /** Contents of the left gutter — row number and drag handle by default. */
+  gutter?: (props: { row: GridRow; rowIndex: number; selected: boolean }) => unknown
+}>()
+
+// Returned as template-literal types, not plain `string`, so `<slot :name>`
+// still type-checks against the slot declarations above.
+/** `cell.<key>` if given, else the catch-all, else null to render normally. */
+function cellSlotName(key: string): 'cell' | `cell.${string}` | null {
+  if (slots[`cell.${key}`]) return `cell.${key}`
+  return slots.cell ? 'cell' : null
+}
+
+function editorSlotName(key: string): 'editor' | `editor.${string}` | null {
+  if (slots[`editor.${key}`]) return `editor.${key}`
+  return slots.editor ? 'editor' : null
+}
 
 const DEFAULT_MENU_LABELS: GridMenuLabels = {
   insertAbove: 'Insert row above',
@@ -107,6 +187,7 @@ const DEFAULT_MENU_LABELS: GridMenuLabels = {
 }
 
 const wrapperRef = ref<HTMLElement | null>(null)
+const scrollRef = ref<HTMLElement | null>(null)
 
 // --- Selection -------------------------------------------------------------
 // `active` is the focused cell (the Excel "current cell"); `anchor` is the
@@ -150,7 +231,7 @@ watch(
 const totalWidth = computed(
   () =>
     props.columns.reduce((sum, c) => sum + (widths[c.key] ?? props.defaultColumnWidth), 0) +
-    (props.showRowNumbers ? GUTTER_WIDTH : 0),
+    (props.showRowNumbers ? props.gutterWidth : 0),
 )
 
 const scrollStyle = computed(() => ({
@@ -171,8 +252,61 @@ function headerClassFor(column: GridColumn) {
   ]
 }
 
-function isEditable(column: GridColumn): boolean {
-  return !props.readonly && column.editable !== false
+// --- Editor hints ----------------------------------------------------------
+// Cells render as plain text until they are edited, so nothing tells you a
+// column drops down a list or opens a calendar. These icons say so up front:
+// once in the header, for scanning the table, and again in the focused cell,
+// the way Excel marks a cell with data validation.
+//
+// `text` and `number` get none — a text box is the assumption, and `number`
+// already reads as one from its alignment. A checkbox draws itself.
+const TYPE_ICONS: Partial<Record<NonNullable<GridColumn['type']>, string>> = {
+  select: 'mdi-menu-down',
+  autocomplete: 'mdi-magnify',
+  date: 'mdi-calendar-blank-outline',
+}
+
+/** Icon per column key, resolved once instead of per rendered cell. */
+const typeIconByKey = computed(() => {
+  const icons: Record<string, string> = {}
+  if (!props.typeIcons) return icons
+  for (const column of props.columns) {
+    if (column.typeIcon === false) continue
+    const icon = column.typeIcon ?? TYPE_ICONS[column.type ?? 'text']
+    if (icon) icons[column.key] = icon
+  }
+  return icons
+})
+
+// --- Read-only rules -------------------------------------------------------
+// Four layers, coarsest first: the whole table, the row, the column, then the
+// single cell. Any one of them locking wins — a cell is editable only when all
+// of them allow it.
+
+/** Indices listed in `readonlyRows`, when it was given as an array. */
+const readonlyRowSet = computed(() =>
+  Array.isArray(props.readonlyRows) ? new Set(props.readonlyRows) : null,
+)
+
+function isRowReadonly(rowIndex: number): boolean {
+  const rule = props.readonlyRows
+  if (!rule) return false
+  if (readonlyRowSet.value) return readonlyRowSet.value.has(rowIndex)
+  const row = rows.value[rowIndex]
+  return row ? (rule as (row: GridRow, index: number) => boolean)(row, rowIndex) : false
+}
+
+/** The one question the rest of the grid asks: may this cell be written to? */
+function isCellEditable(rowIndex: number, colIndex: number): boolean {
+  if (props.readonly) return false
+  const column = props.columns[colIndex]
+  if (!column) return false
+  if (column.editable === false || isRowReadonly(rowIndex)) return false
+  if (props.cellReadonly) {
+    const row = rows.value[rowIndex]
+    if (row && props.cellReadonly({ row, rowIndex, column, colIndex })) return false
+  }
+  return true
 }
 
 /** Columns whose editor owns the Enter key while its option list is open. */
@@ -211,19 +345,71 @@ function setActive(cell: GridCellRef, extend = false) {
   void scrollActiveIntoView()
 }
 
-/** Public: move the focus box programmatically. */
-function focusCell(row: number, col: number) {
-  setActive({ row, col })
+/** Public: move the focus box programmatically. `col` accepts a column key. */
+function focusCell(row: number, col: number | string) {
+  setActive({ row, col: resolveColIndex(col) })
   focusWrapper()
 }
 
+/** Columns are addressable by `key` as well as index, for callers' comfort. */
+function resolveColIndex(col: number | string | undefined): number {
+  if (typeof col === 'number') return col
+  if (typeof col !== 'string') return 0
+  const index = props.columns.findIndex((column) => column.key === col)
+  return index === -1 ? 0 : index
+}
+
+// --- Initial focus ---------------------------------------------------------
+// Runs once, as soon as there is something to point at: `initialCell` may be
+// set before the rows have loaded, and clamping against an empty grid would
+// silently land on {0,0}.
+let initialCellDone = false
+
+function applyInitialCell() {
+  if (initialCellDone) return
+  if (!props.initialCell && !props.autofocus) return
+  if (!rows.value.length || !props.columns.length) return
+
+  initialCellDone = true
+  const cell = props.initialCell ?? {}
+  setActive({ row: cell.row ?? 0, col: resolveColIndex(cell.col) })
+  if (props.autofocus) focusWrapper()
+}
+
+onMounted(applyInitialCell)
+watch([rows, () => props.columns], applyInitialCell)
+
+/**
+ * Keep the active cell visible by scrolling the grid's own container, by hand.
+ *
+ * `element.scrollIntoView()` is wrong for this twice over: it walks *every*
+ * scrollable ancestor, so moving a cell can yank the surrounding page around,
+ * and it stops at the container's edge — which here is underneath the sticky
+ * header and the frozen gutter, so the cell it just "revealed" stays covered.
+ */
 async function scrollActiveIntoView() {
   await nextTick()
   const cell = active.value
-  if (!cell) return
-  wrapperRef.value
-    ?.querySelector<HTMLElement>(`[data-cell="${cell.row}-${cell.col}"]`)
-    ?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  const container = scrollRef.value
+  if (!cell || !container) return
+  const target = container.querySelector<HTMLElement>(`[data-cell="${cell.row}-${cell.col}"]`)
+  if (!target) return
+
+  const view = container.getBoundingClientRect()
+  const box = target.getBoundingClientRect()
+  // The sticky header and gutter float over the scroll area; the cell has to
+  // clear them, not merely reach the container's edge. An unpinned header
+  // scrolls away with the rows, so it reserves nothing.
+  const headerHeight = props.fixedHeader
+    ? (container.querySelector('thead')?.getBoundingClientRect().height ?? 0)
+    : 0
+  const gutterWidth = props.showRowNumbers ? props.gutterWidth : 0
+
+  if (box.top < view.top + headerHeight) container.scrollTop -= view.top + headerHeight - box.top
+  else if (box.bottom > view.bottom) container.scrollTop += box.bottom - view.bottom
+
+  if (box.left < view.left + gutterWidth) container.scrollLeft -= view.left + gutterWidth - box.left
+  else if (box.right > view.right) container.scrollLeft += box.right - view.right
 }
 
 function moveActive(dRow: number, dCol: number, extend = false) {
@@ -277,7 +463,7 @@ function applyChanges(
   for (const update of updates) {
     const column = props.columns[update.col]
     const target = next[update.row]
-    if (!column || !target || !isEditable(column)) continue
+    if (!column || !target || !isCellEditable(update.row, update.col)) continue
     if (Object.is(target[column.key], update.value)) continue
 
     next[update.row] = { ...target, [column.key]: update.value }
@@ -310,7 +496,7 @@ function beginEdit(text?: string) {
   const cell = active.value
   if (!cell || editing.value) return
   const column = props.columns[cell.col]
-  if (!column || !isEditable(column)) return
+  if (!column || !isCellEditable(cell.row, cell.col)) return
 
   // A checkbox has nothing to type into — treat the gesture as a toggle.
   if (column.type === 'checkbox') {
@@ -385,11 +571,62 @@ function cancelEdit() {
   stopEdit()
 }
 
+// --- Slot payloads ---------------------------------------------------------
+// Built here rather than inline in the template so the shape stays one thing,
+// matching the exported `GridCellSlotProps` / `GridEditorSlotProps`.
+function cellSlotProps(
+  row: GridRow,
+  rowIndex: number,
+  column: GridColumn,
+  colIndex: number,
+): GridCellSlotProps {
+  return {
+    row,
+    rowIndex,
+    column,
+    colIndex,
+    value: row[column.key],
+    text: cellText(column, row),
+    active: isActive(rowIndex, colIndex),
+    selected: isSelected(rowIndex, colIndex),
+    editable: isCellEditable(rowIndex, colIndex),
+    edit: () => {
+      setActive({ row: rowIndex, col: colIndex })
+      beginEdit()
+    },
+    setValue: (value) => setCellValue(rowIndex, colIndex, value),
+  }
+}
+
+function editorSlotProps(
+  row: GridRow,
+  rowIndex: number,
+  column: GridColumn,
+  colIndex: number,
+): GridEditorSlotProps {
+  return {
+    row,
+    rowIndex,
+    column,
+    colIndex,
+    value: draft.value,
+    initialText: initialText.value,
+    update: (value: GridCellValue) => {
+      draft.value = value
+    },
+    // Enter / Tab / Escape are already handled on the wrapper while editing, so
+    // a slot editor inherits them for free; this is for editors that finish on
+    // their own, like clicking an option out of a menu.
+    commit: (move = 'none') => commitEdit(move),
+    cancel: cancelEdit,
+  }
+}
+
 function toggleActiveCheckbox() {
   const cell = active.value
   if (!cell) return
   const column = props.columns[cell.col]
-  if (!column || column.type !== 'checkbox' || !isEditable(column)) return
+  if (!column || column.type !== 'checkbox' || !isCellEditable(cell.row, cell.col)) return
   setCellValue(cell.row, cell.col, !rows.value[cell.row]?.[column.key], 'toggle')
 }
 
@@ -472,6 +709,14 @@ const menuRows = computed(() => {
   if (range) return { from: range.r1, to: range.r2 }
   const row = active.value?.row ?? 0
   return { from: row, to: row }
+})
+
+/** A locked row is not deletable either — `readonlyRows` protects the record. */
+const menuHasReadonlyRow = computed(() => {
+  if (!props.readonlyRows) return false
+  const { from, to } = menuRows.value
+  for (let row = from; row <= to; row++) if (isRowReadonly(row)) return true
+  return false
 })
 
 function insertRow(at: number) {
@@ -834,18 +1079,26 @@ function finishRowDrag() {
   active.value = { row: to, col: active.value?.col ?? 0 }
 }
 
-function rowClasses(index: number) {
-  return {
-    'is-dragging': draggingRow.value === index,
-    'is-drop-before': draggingRow.value !== null && dropIndex.value === index,
-    'is-drop-after':
-      draggingRow.value !== null && dropIndex.value === rows.value.length && index === rows.value.length - 1,
-  }
+function rowClasses(row: GridRow, index: number) {
+  const custom = typeof props.rowClass === 'function' ? props.rowClass(row, index) : props.rowClass
+  return [
+    custom,
+    {
+      'is-dragging': draggingRow.value === index,
+      'is-drop-before': draggingRow.value !== null && dropIndex.value === index,
+      'is-drop-after':
+        draggingRow.value !== null && dropIndex.value === rows.value.length && index === rows.value.length - 1,
+    },
+  ]
 }
 
 // --- Focus tracking --------------------------------------------------------
 function onFocusIn() {
   hasFocus.value = true
+  // Reached by Tab with nothing selected yet: land on the first cell, so the
+  // arrow keys do something. Without this the grid can hold keyboard focus and
+  // still ignore every keystroke, and a click would be the only way in.
+  if (!active.value && rows.value.length && props.columns.length) setActive({ row: 0, col: 0 })
 }
 
 function onFocusOut(event: FocusEvent) {
@@ -857,14 +1110,18 @@ function onFocusOut(event: FocusEvent) {
   if (editing.value) commitEdit('none', false)
 }
 
-defineExpose({ active, selection, focusCell })
+defineExpose({ active, selection, focusCell, isCellEditable })
 </script>
 
 <template>
   <div
     ref="wrapperRef"
     class="grid-table"
-    :class="{ 'is-resizing': resizingKey !== null, 'is-blurred': !hasFocus }"
+    :class="{
+      'is-resizing': resizingKey !== null,
+      'is-blurred': !hasFocus,
+      'has-fixed-header': fixedHeader,
+    }"
     tabindex="0"
     @keydown="onKeydown"
     @copy="onCopy"
@@ -881,6 +1138,7 @@ defineExpose({ active, selection, focusCell })
     />
 
     <div
+      ref="scrollRef"
       class="grid-scroll"
       :style="scrollStyle"
     >
@@ -891,7 +1149,7 @@ defineExpose({ active, selection, focusCell })
         <colgroup>
           <col
             v-if="showRowNumbers"
-            :style="{ width: `${GUTTER_WIDTH}px` }"
+            :style="{ width: `${gutterWidth}px` }"
           >
           <col
             v-for="column in columns"
@@ -913,7 +1171,16 @@ defineExpose({ active, selection, focusCell })
               :class="[headerClassFor(column), { 'is-resizing': resizingKey === column.key }]"
               :style="headerStyleFor(column)"
             >
-              <span class="grid-head-text">{{ column.title }}</span>
+              <span
+                class="grid-head-text"
+                :class="{ 'has-type-icon': typeIconByKey[column.key] }"
+              >{{ column.title }}</span>
+              <v-icon
+                v-if="typeIconByKey[column.key]"
+                class="grid-type-icon"
+                size="13"
+                :icon="typeIconByKey[column.key]"
+              />
               <span
                 v-if="resizable"
                 class="grid-resizer"
@@ -929,7 +1196,7 @@ defineExpose({ active, selection, focusCell })
             v-for="(row, rowIndex) in rows"
             :key="rowKey(row, rowIndex)"
             :data-row="rowIndex"
-            :class="rowClasses(rowIndex)"
+            :class="rowClasses(row, rowIndex)"
           >
             <td
               v-if="showRowNumbers"
@@ -939,13 +1206,20 @@ defineExpose({ active, selection, focusCell })
               @click="selectWholeRow(rowIndex, $event.shiftKey)"
               @contextmenu="onContextMenu($event, rowIndex, null)"
             >
-              <v-icon
-                v-if="reorderable"
-                class="grid-drag-handle"
-                size="14"
-                icon="mdi-drag"
-              />
-              <span class="grid-row-number">{{ rowIndex + 1 }}</span>
+              <slot
+                name="gutter"
+                :row="row"
+                :row-index="rowIndex"
+                :selected="!!selection && rowIndex >= selection.r1 && rowIndex <= selection.r2"
+              >
+                <v-icon
+                  v-if="reorderable"
+                  class="grid-drag-handle"
+                  size="12"
+                  icon="mdi-drag"
+                />
+                <span class="grid-row-number">{{ rowIndex + 1 }}</span>
+              </slot>
             </td>
 
             <td
@@ -959,7 +1233,7 @@ defineExpose({ active, selection, focusCell })
                   'is-active': isActive(rowIndex, colIndex),
                   'is-selected': isSelected(rowIndex, colIndex),
                   'is-editing': isEditingCell(rowIndex, colIndex),
-                  'is-readonly': !isEditable(column),
+                  'is-readonly': !isCellEditable(rowIndex, colIndex),
                 },
               ]"
               :aria-selected="isSelected(rowIndex, colIndex)"
@@ -968,26 +1242,55 @@ defineExpose({ active, selection, focusCell })
               @dblclick="beginEdit()"
               @contextmenu="onContextMenu($event, rowIndex, colIndex)"
             >
-              <GridCellEditor
-                v-if="isEditingCell(rowIndex, colIndex)"
-                v-model="draft"
-                v-model:menu-open="editorMenuOpen"
-                :column="column"
-                :initial-text="initialText"
-                @pick="onEditorPick"
+              <template v-if="isEditingCell(rowIndex, colIndex)">
+                <slot
+                  v-if="editorSlotName(column.key)"
+                  :name="editorSlotName(column.key)!"
+                  v-bind="editorSlotProps(row, rowIndex, column, colIndex)"
+                />
+                <GridCellEditor
+                  v-else
+                  v-model="draft"
+                  v-model:menu-open="editorMenuOpen"
+                  :column="column"
+                  :initial-text="initialText"
+                  @pick="onEditorPick"
+                />
+              </template>
+
+              <template v-else>
+                <slot
+                  v-if="cellSlotName(column.key)"
+                  :name="cellSlotName(column.key)!"
+                  v-bind="cellSlotProps(row, rowIndex, column, colIndex)"
+                />
+                <v-checkbox-btn
+                  v-else-if="column.type === 'checkbox'"
+                  class="grid-checkbox"
+                  :model-value="Boolean(row[column.key])"
+                  :disabled="!isCellEditable(rowIndex, colIndex)"
+                  density="compact"
+                  @update:model-value="setCellValue(rowIndex, colIndex, Boolean($event), 'toggle')"
+                />
+                <span
+                  v-else
+                  class="grid-cell-text"
+                >{{ cellText(column, row) }}</span>
+              </template>
+
+              <!-- Excel's data-validation arrow: only on the cell you are on,
+                   and only where there is actually something to open. -->
+              <v-icon
+                v-if="
+                  typeIconByKey[column.key] &&
+                    isActive(rowIndex, colIndex) &&
+                    !isEditingCell(rowIndex, colIndex) &&
+                    isCellEditable(rowIndex, colIndex)
+                "
+                class="grid-cell-hint"
+                size="14"
+                :icon="typeIconByKey[column.key]"
               />
-              <v-checkbox-btn
-                v-else-if="column.type === 'checkbox'"
-                class="grid-checkbox"
-                :model-value="Boolean(row[column.key])"
-                :disabled="!isEditable(column)"
-                density="compact"
-                @update:model-value="setCellValue(rowIndex, colIndex, Boolean($event), 'toggle')"
-              />
-              <span
-                v-else
-                class="grid-cell-text"
-              >{{ cellText(column, row) }}</span>
             </td>
           </tr>
 
@@ -1037,7 +1340,7 @@ defineExpose({ active, selection, focusCell })
         <v-list-item
           prepend-icon="mdi-table-row-remove"
           :title="menuLabels.deleteRow"
-          :disabled="readonly || !rows.length"
+          :disabled="readonly || menuHasReadonlyRow || !rows.length"
           base-color="error"
           @click="deleteRows"
         />
@@ -1086,10 +1389,12 @@ td {
   user-select: none;
 }
 
+/* Stacking order, bottom to top: plain cells (auto) → the focused cell (1) →
+   the frozen gutter (2) → the sticky header (3) → their intersection (4).
+   The gutter has to outrank the focus box, or an active cell scrolled under it
+   would paint its outline straight over the frozen column. */
 thead th {
-  position: sticky;
-  top: 0;
-  z-index: 2;
+  z-index: 3;
   font-weight: 600;
   background-color: rgb(var(--v-theme-surface));
   /* Tint that works on both light and dark themes. */
@@ -1099,18 +1404,43 @@ thead th {
   );
 }
 
+/* `fixedHeader`. Only the vertical axis is optional: the gutter's header cell
+   keeps `position: sticky; left: 0` from `.grid-gutter` either way, so turning
+   this off frees the header to scroll up while the frozen column still works. */
+.has-fixed-header thead th {
+  position: sticky;
+  top: 0;
+}
+
 .grid-head-text {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-/* Row-number / drag gutter, frozen to the left edge. */
+/* Reserve room so a long title ellipsises before it reaches the icon. */
+.grid-head-text.has-type-icon {
+  padding-right: 15px;
+}
+
+/* Absolute rather than inline, so the header keeps its `text-align`. Sits
+   inside the resize grip's 7px, which stays clickable above it. */
+.grid-type-icon {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+/* Row-number / drag gutter, frozen to the left edge. Kept narrow: the whole
+   cell is the drag target, so the handle only has to hint at it. */
 .grid-gutter {
   position: sticky;
   left: 0;
-  z-index: 1;
-  padding: 0 4px;
+  z-index: 2;
+  padding: 0 2px;
   text-align: center;
   color: rgba(var(--v-theme-on-surface), 0.6);
   font-size: 0.75rem;
@@ -1122,23 +1452,52 @@ thead th {
   cursor: grab;
 }
 
+/* The body gutter's backdrop is painted by a pseudo-element instead of the
+   cell's own `background`, because being on top is worthless if it is
+   see-through: a `rowClass` rule tinting `td`, or any host stylesheet reaching
+   a table cell, replaces `background-color` and the scrolling columns show
+   straight through the frozen column. Nothing a caller writes on `td` can
+   reach this layer. `z-index: -1` keeps it behind the row number while staying
+   inside the gutter's own stacking context, so it still covers every cell that
+   scrolls underneath. The header gutter is left alone — it takes `headerStyle`
+   from the caller, whose background must stay visible. */
+td.grid-gutter::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background-color: rgb(var(--v-theme-surface));
+  background-image: linear-gradient(
+    rgba(var(--v-theme-on-surface), 0.06),
+    rgba(var(--v-theme-on-surface), 0.06)
+  );
+}
+
 .grid-gutter-head {
-  z-index: 3;
+  z-index: 4;
   cursor: default;
 }
 
-.grid-gutter.is-row-selected {
+td.grid-gutter.is-row-selected::before {
   background-image: linear-gradient(
     rgba(var(--v-theme-primary), 0.18),
     rgba(var(--v-theme-primary), 0.18)
   );
+}
+
+.grid-gutter.is-row-selected {
   color: rgb(var(--v-theme-on-surface));
 }
 
+/* Overlaid rather than laid out, so it costs the gutter no width. */
 .grid-drag-handle {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
   opacity: 0;
-  margin-right: 2px;
   transition: opacity 0.1s ease;
+  pointer-events: none;
 }
 
 tr:hover .grid-drag-handle {
@@ -1163,23 +1522,42 @@ tr:hover .grid-drag-handle {
   z-index: 1;
 }
 
-/* Focus lives elsewhere on the page: drop the cell highlight entirely so the
-   grid does not look active. The position is kept and restored on refocus. */
+/* Focus lives elsewhere on the page: grey the box down so the grid does not
+   look active, but keep it drawn — it is where the next keystroke will land,
+   and it is the only thing `initialCell` has to show for itself before the
+   user clicks in. */
 .is-blurred .grid-cell.is-active {
-  outline: none;
+  outline-color: rgba(var(--v-theme-on-surface), 0.26);
 }
 
-.is-blurred .grid-cell.is-selected,
-.is-blurred .grid-gutter.is-row-selected {
+.is-blurred .grid-cell.is-selected {
   background-color: transparent;
+  background-image: none;
+}
+
+/* Blurred: the gutter falls back to its neutral tint. Overriding the gradient
+   only — clearing `background-color` here is what used to punch a hole in the
+   frozen column for every selected row. */
+.is-blurred td.grid-gutter.is-row-selected::before {
   background-image: linear-gradient(
     rgba(var(--v-theme-on-surface), 0.06),
     rgba(var(--v-theme-on-surface), 0.06)
   );
 }
 
-.is-blurred .grid-cell.is-selected {
-  background-image: none;
+/* The hint on the focused cell. Overlays the text's tail rather than reserving
+   width, so nothing reflows as the focus box moves from cell to cell. */
+.grid-cell-hint {
+  position: absolute;
+  right: 2px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: rgb(var(--v-theme-primary));
+  pointer-events: none;
+}
+
+.is-blurred .grid-cell-hint {
+  color: rgba(var(--v-theme-on-surface), 0.4);
 }
 
 .grid-cell.is-editing {
@@ -1229,6 +1607,17 @@ tr.is-drop-before td {
 }
 
 tr.is-drop-after td {
+  box-shadow: inset 0 -2px 0 0 rgb(var(--v-theme-primary));
+}
+
+/* The gutter's backdrop is painted over the cell's own inset shadow, so the
+   insertion line has to be drawn on that layer too or it breaks at the frozen
+   column — exactly where the drag is happening. */
+tr.is-drop-before td.grid-gutter::before {
+  box-shadow: inset 0 2px 0 0 rgb(var(--v-theme-primary));
+}
+
+tr.is-drop-after td.grid-gutter::before {
   box-shadow: inset 0 -2px 0 0 rgb(var(--v-theme-primary));
 }
 </style>

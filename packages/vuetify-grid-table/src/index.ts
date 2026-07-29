@@ -8,14 +8,20 @@ export default GridTable
 
 export type {
   GridCellChange,
+  GridCellContext,
   GridCellRef,
+  GridCellSlotProps,
   GridCellValue,
   GridColumn,
   GridColumnType,
+  GridEditorSlotProps,
+  GridInitialCell,
   GridMenuLabels,
   GridOption,
   GridRange,
+  GridReadonlyRows,
   GridRow,
+  GridRowClass,
 } from './components/grid-table/types'
 
 /**

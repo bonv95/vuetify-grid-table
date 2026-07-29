@@ -62,18 +62,37 @@ app.use(vuetify).use(VuetifyGridTable)
 
 ## Column types
 
-| `type`           | Editor                               | Stored value          |
-| ---------------- | ------------------------------------ | --------------------- |
-| `text` (default) | `v-text-field`                       | `string`              |
-| `number`         | `v-text-field[number]`               | `number \| null`      |
-| `select`         | `v-select`                           | the option's `value`  |
-| `autocomplete`   | `v-autocomplete`                     | the option's `value`  |
-| `date`           | `v-text-field` + `v-date-picker`     | `'YYYY-MM-DD'`        |
-| `checkbox`       | `v-checkbox-btn` (rendered in place) | `boolean`             |
+| `type`           | Editor                               | Hint                        | Stored value          |
+| ---------------- | ------------------------------------ | --------------------------- | --------------------- |
+| `text` (default) | `v-text-field`                       | —                           | `string`              |
+| `number`         | `v-text-field[number]`               | —                           | `number \| null`      |
+| `select`         | `v-select`                           | `mdi-menu-down`             | the option's `value`  |
+| `autocomplete`   | `v-autocomplete`                     | `mdi-magnify`               | the option's `value`  |
+| `date`           | `v-text-field` + `v-date-picker`     | `mdi-calendar-blank-outline`| `'YYYY-MM-DD'`        |
+| `checkbox`       | `v-checkbox-btn` (rendered in place) | — (draws itself)            | `boolean`             |
 
-Per column: `width`, `minWidth`, `align`, `editable: false`, `items` (for the
-two list types), `format(value, row)` to override the displayed — and copied —
-text, plus `headerAlign` / `headerStyle` / `headerClass` for the header cell.
+Per column: `width`, `minWidth`, `align`, `editable: false`, `typeIcon`, `items`
+(for the two list types), `format(value, row)` to override the displayed — and
+copied — text, plus `headerAlign` / `headerStyle` / `headerClass` for the header
+cell.
+
+`checkbox` is the one type with no editor to open, because it has no draft to
+commit or cancel: `Space`, `F2` and a double-click all toggle it straight away,
+and the change arrives as `source: 'toggle'`.
+
+### Telling the types apart
+
+A cell renders as plain text until it is edited, so nothing would otherwise say
+that a column drops down a list or opens a calendar. The **Hint** column above
+is shown twice: muted in the header, so the whole table can be scanned at a
+glance, and again in the focused cell in the theme's primary colour — the way
+Excel marks a cell with data validation. `text` and `number` get none (a text
+box is the assumption, and numbers read as numbers from their alignment), and a
+checkbox already draws itself.
+
+Turn the icons off table-wide with `:type-icons="false"`, or per column with
+`typeIcon: false`. Any mdi name works as an override, which is useful for a text
+column with its own meaning: `typeIcon: 'mdi-email-outline'`.
 
 ### Date shorthand
 
@@ -91,6 +110,19 @@ button (or `Alt+↓`). Missing parts are completed from today, so on 2026-07-27:
 Text that is not a date (including impossible ones like `20250230`) leaves the
 cell's value untouched rather than wiping it; clearing the box clears the
 value. Pasted dates go through the same parser.
+
+### Fixed header
+
+On by default, and it needs `height` to mean anything: without one the grid is
+as tall as its rows, the body never scrolls, and there is nothing for the header
+to stay put against. `:fixed-header="false"` lets it scroll up with the rows.
+
+The gutter is unaffected either way — it stays frozen to the left edge on the
+horizontal axis, header cell included.
+
+```vue
+<GridTable v-model="rows" :columns="columns" height="480" :fixed-header="false" />
+```
 
 ### Header styling
 
@@ -111,19 +143,81 @@ fields on a column override them for that column.
 | `v-model`                     | —         | `GridRow[]`; replaced immutably on every change      |
 | `columns`                     | —         | `GridColumn[]`                                       |
 | `itemKey`                     | `'id'`    | Row property used as the render key                  |
-| `height`                      | —         | Max height of the scroll area; header stays sticky   |
+| `height`                      | —         | Max height of the scroll area; needed to scroll at all |
+| `fixedHeader`                 | `true`    | Freeze the header row while the body scrolls         |
 | `defaultColumnWidth`          | `160`     | Width for columns that set none                      |
 | `enterDirection`              | `'down'`  | Where Enter goes: `'down'` or `'right'`              |
 | `headerStyle` / `headerClass` | —         | Applied to every header cell                         |
+| `typeIcons`                   | `true`    | Icon per column advertising its editor               |
 | `contextMenu`                 | `true`    | Right-click menu (insert / copy / delete row)        |
 | `menuLabels`                  | English   | Wording for that menu                                |
+| `rowClass`                    | —         | Class(es) per row: string, array, or `(row, i) => …`  |
 | `showRowNumbers`              | `true`    | Left gutter with row number + drag handle            |
+| `gutterWidth`                 | `36`      | Width of that gutter, in px                          |
 | `reorderable`                 | `true`    | Drag rows by the gutter                              |
 | `resizable`                   | `true`    | Drag column edges                                    |
 | `readonly`                    | `false`   | Block edits (selection and copy still work)          |
+| `readonlyRows`                | —         | Lock rows: `number[]`, or `(row, index) => boolean`  |
+| `cellReadonly`                | —         | Lock single cells: `({ row, rowIndex, column, colIndex }) => boolean` |
+| `initialCell`                 | —         | `{ row, col }` to focus on mount; `col` takes a key  |
+| `autofocus`                   | `false`   | Also take keyboard focus on mount                    |
 | `growOnPaste`                 | `true`    | Append rows when a paste runs past the last one      |
 | `createRow`                   | blank row | Factory for rows added by paste                      |
 | `loading`                     | `false`   | Indeterminate progress bar                           |
+
+### Read-only, in layers
+
+Four rules are checked, coarsest first — the table, the row, the column, then
+the cell. Any one of them locking is enough, so they compose freely. A locked
+cell still selects, copies and prints; only writes (typing, paste, `Delete`,
+checkbox toggles) are refused, and `readonlyRows` also protects its rows from
+the menu's delete.
+
+A **column** is locked where it is defined, with `editable: false`, since that
+is config the caller already owns:
+
+```ts
+const columns: GridColumn[] = [
+  { key: 'reference', title: 'Reference' },
+  { key: 'amount', title: 'Amount', editable: false, format: (_v, row) => money(row) },
+]
+```
+
+A **row** is locked with the `readonlyRows` prop — row indices, or a predicate —
+because rows are your data, not the grid's config:
+
+```vue
+<GridTable
+  v-model="rows"
+  :columns="columns"
+  :readonly-rows="(row) => row.status === 'shipped'"
+  :cell-readonly="({ row, column }) => column.key === 'discount' && !row.contract"
+/>
+```
+
+### Initial focus
+
+`initialCell` places the focus box as the grid mounts, waiting for the rows if
+they arrive from a request. `col` accepts a column `key` as well as an index:
+
+```vue
+<GridTable v-model="rows" :columns="columns" :initial-cell="{ row: 0, col: 'customer' }" autofocus />
+```
+
+`initialCell` alone only *places* the box — it does not take keyboard focus, so
+the arrow keys still belong to the page and the box shows greyed. Add
+`autofocus` when you want the grid usable without a click: arrows, `Enter` and
+type-to-edit all work from the first keystroke.
+
+Either way no mouse is required. The grid is a tab stop, and focusing it with
+nothing selected lands on the first cell, so `Tab` into it and the arrow keys
+work. `initialCell` applies once, by design — use the exposed `focusCell()` to
+move afterwards.
+
+Cell navigation only ever scrolls the grid's own container: the surrounding page
+is never moved, and cells are kept clear of whatever floats over the scroll area
+— the frozen gutter, and the header while `fixedHeader` is on — rather than
+merely brought to the container's edge.
 
 ## Events
 
@@ -132,6 +226,92 @@ fields on a column override them for that column.
 - `@row-move` — `{ from, to }` after a drag reorder.
 - `@row-insert` — `{ index }` after a menu insert.
 - `@row-delete` — `{ from, to }` after a menu delete.
+
+## Slots
+
+| Slot            | Replaces                                        |
+| --------------- | ----------------------------------------------- |
+| `cell.<key>`    | What one column's cells render when not editing |
+| `cell`          | The same, for every column without its own slot |
+| `editor.<key>`  | One column's editor                             |
+| `editor`        | The editor for every column without its own     |
+| `gutter`        | The row number and drag handle                  |
+| `empty`         | The "No data" row                               |
+
+Each pair is *one column* plus *every column*: `cell.total` wins for that
+column, `cell` catches the rest, and with neither the grid renders as it always
+did. Everything else — selection, focus, copy, paste, keyboard — carries on
+working, because a slot only fills in a cell's contents.
+
+### Custom cell display
+
+```vue
+<GridTable v-model="rows" :columns="columns">
+  <template #cell.status="{ text, value }">
+    <v-chip :color="value === 'shipped' ? 'success' : 'info'" size="x-small" label>{{ text }}</v-chip>
+  </template>
+</GridTable>
+```
+
+Handed `{ row, rowIndex, column, colIndex, value, text, active, selected,
+editable, edit, setValue }` (`GridCellSlotProps`). `value` is the stored value
+and `text` is what the grid would have rendered — also exactly what copy puts on
+the clipboard, so reusing it keeps display and clipboard consistent. `edit()`
+opens the editor and `setValue()` writes the cell through the normal pipeline,
+so `cell-change` fires and read-only rules still hold.
+
+The editor is unaffected: a chip-rendered column still opens its usual `select`
+when you type into it.
+
+### Custom editor
+
+```vue
+<template #editor.quantity="{ value, update, commit, cancel }">
+  <v-slider
+    :model-value="Number(value ?? 0)" :max="500" hide-details
+    @update:model-value="update"
+    @end="commit('down')"
+  />
+</template>
+```
+
+Handed `{ row, rowIndex, column, colIndex, value, initialText, update, commit,
+cancel }` (`GridEditorSlotProps`). `value` is the *draft*, not the row's value —
+`update()` revises it and `commit(move?)` writes it and moves on (`'down'`,
+`'up'`, `'right'`, `'left'`, or the default `'none'` to stay). `initialText` is
+the keystroke that opened the editor, when typing is what opened it.
+
+`Enter`, `Tab` and `Esc` keep working without you wiring anything: they are
+handled on the grid wrapper and a slot editor sits inside it. Only call `commit`
+yourself for editors that finish on their own, like a slider release or a
+clicked option. Don't `stopPropagation()` on keydown, or you take those keys
+away from the grid.
+
+### Rows
+
+There is deliberately **no slot for the `<tr>` or the `<td>`**. The grid finds
+cells through `[data-cell="row-col"]` and rows through `tr[data-row]` for
+selection, scrolling and drag reorder, so handing those elements over would
+break navigation in ways nothing would report. Row-level appearance goes through
+the `rowClass` prop, and per-row contents through the `gutter` slot:
+
+```vue
+<GridTable :row-class="(row) => (row.urgent ? 'row-urgent' : undefined)">
+  <template #gutter="{ row, rowIndex }">
+    <v-icon v-if="row.locked" icon="mdi-lock-outline" size="12" />
+    <span v-else>{{ rowIndex + 1 }}</span>
+  </template>
+</GridTable>
+```
+
+`rowClass` takes a string, an array, or `(row, index) => …`. From a parent with
+scoped styles the class lands on a child component's `<tr>`, so target it with
+`:deep(.row-urgent) td`.
+
+A `td` background from `rowClass` stops at the gutter, which keeps its own
+backdrop. That is deliberate: the gutter is frozen chrome that the other columns
+scroll underneath, so it has to stay opaque no matter what a caller paints on
+table cells — the same choice Excel makes for its row headers.
 
 ## Right-click menu
 
@@ -143,8 +323,9 @@ prop, so the caller can assign ids.
 
 ## Exposed
 
-`focusCell(row, col)`, plus the reactive `active` cell and `selection`
-rectangle (`{ r1, c1, r2, c2 }`, inclusive).
+`focusCell(row, col)` — `col` accepts a column `key` — and
+`isCellEditable(rowIndex, colIndex)`, plus the reactive `active` cell and
+`selection` rectangle (`{ r1, c1, r2, c2 }`, inclusive).
 
 ## Keyboard
 
@@ -201,6 +382,19 @@ import {
   formatDate, toDate, toIsoDate,
   parseClipboardMatrix, toClipboardText, // TSV
   emptyValue, normalizeDraft, toCellValue,
+} from 'vuetify-grid-table'
+```
+
+And the types, for annotating your own columns, handlers and slot wrappers:
+
+```ts
+import type {
+  GridColumn, GridColumnType, GridOption, GridRow, GridCellValue,
+  GridCellChange,                          // the @cell-change payload
+  GridCellRef, GridRange,                  // { row, col } and { r1, c1, r2, c2 }
+  GridCellSlotProps, GridEditorSlotProps,  // what the cell / editor slots hand you
+  GridCellContext,                         // the cellReadonly argument
+  GridReadonlyRows, GridRowClass, GridInitialCell, GridMenuLabels,
 } from 'vuetify-grid-table'
 ```
 
