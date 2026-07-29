@@ -398,6 +398,12 @@ import type {
 } from 'vuetify-grid-table'
 ```
 
+## Changelog
+
+Every release is written up in
+[CHANGELOG.md](https://github.com/bonv95/vuetify-grid-table/blob/main/CHANGELOG.md).
+Absolute link on purpose — the file is not in the npm tarball.
+
 ## License
 
 MIT

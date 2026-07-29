@@ -83,17 +83,30 @@ The version in `packages/vuetify-grid-table/package.json` is the published versi
 `prepublishOnly` rebuilds and type-checks, so a broken build cannot ship.
 
 ```bash
-npm login                                   # once
+npm login                                   # once — tokens do expire
 npm version patch -w vuetify-grid-table     # or minor / major
+git commit -am "Release v0.1.4" && git tag v0.1.4
 npm run release                             # build + publish --access public
 git push --follow-tags
 ```
 
-`npm pack --dry-run -w vuetify-grid-table` prints the exact tarball contents
-first if you want to check before pushing a version.
+**`npm version` does not commit or tag in a workspace.** It writes the new
+version into the workspace's `package.json` and the root lockfile and stops
+there — npm forces `git-tag-version: false` for every workspace it processes, so
+the commit and the tag are yours to make. That is why the third line exists;
+without it `--follow-tags` has nothing to push.
 
-CI can do it instead: `.github/workflows/release.yml` publishes on any `v*`
-tag, given an `NPM_TOKEN` repository secret (an npm **Automation** token).
+`npm pack --dry-run -w vuetify-grid-table` prints the exact tarball contents
+first if you want to check before publishing.
+
+CI can do it instead: [`.github/workflows/release.yml`](.github/workflows/release.yml)
+publishes on any `v*` tag, given an `NPM_TOKEN` repository secret (an npm
+**Automation** token). It refuses to publish when the tag and the version in
+`package.json` disagree, so a mistyped tag fails the run instead of shipping a
+mislabelled build. Going that route, the steps are the same minus
+`npm run release` — push the tag and the workflow does it.
+
+Every release is written up in [CHANGELOG.md](./CHANGELOG.md).
 
 ## Deploy the demo to Vercel
 

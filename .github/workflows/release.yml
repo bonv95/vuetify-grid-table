@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - run: npm ci
+
+      # The tag names the release, so it has to agree with what is about to be
+      # published. Checking here turns a mistyped tag into a failed run rather
+      # than a version on npm that nothing in the repo matches — and npm
+      # publishes cannot be taken back.
+      - name: Check the tag matches the package version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./packages/vuetify-grid-table/package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag v$tag does not match package version $pkg"
+            exit 1
+          fi
+
+      # A release published by hand still gets its tag pushed, and that would
+      # otherwise fail the run here with "cannot publish over previously
+      # published version" — a red cross on a release that actually shipped
+      # fine. Skip instead, so the workflow is a safety net rather than a
+      # second, competing way to publish.
+      - name: Is this version already on npm?
+        id: check
+        run: |
+          pkg="$(node -p "require('./packages/vuetify-grid-table/package.json').version")"
+          if npm view "vuetify-grid-table@$pkg" version > /dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::vuetify-grid-table@$pkg is already on npm — nothing to publish"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.check.outputs.published == 'false'
+        run: npm run typecheck
+
+      # `release` builds the library then publishes it; `prepublishOnly`
+      # type-checks and builds again, so a broken build cannot ship either way.
+      - if: steps.check.outputs.published == 'false'
+        run: npm run release
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
