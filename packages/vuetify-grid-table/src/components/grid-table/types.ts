@@ -147,3 +147,91 @@ export interface GridCellChange {
   /** What produced it — useful for batching undo entries. */
   source: 'edit' | 'paste' | 'clear' | 'toggle'
 }
+
+/** `row-move`: a row was dragged to a new index. */
+export interface GridRowMove {
+  from: number
+  to: number
+  /** The row that moved. */
+  item: GridRow
+}
+
+/** `row-insert`: a blank row was added from the right-click menu. */
+export interface GridRowInsert {
+  index: number
+  /** The row that was inserted — from `createRow`, when one was given. */
+  item: GridRow
+}
+
+/** `row-delete`: an inclusive span of rows was removed. */
+export interface GridRowDelete {
+  from: number
+  to: number
+  /**
+   * The rows as they were, in order. They are already out of the model by the
+   * time this arrives, so this is the only copy an undo stack can keep.
+   */
+  items: GridRow[]
+}
+
+/** `edit-start`: an editor opened on a cell. */
+export interface GridEditStart {
+  row: number
+  col: number
+  /** The column's `key`. */
+  key: string
+  /** The cell's stored value, which is what the editor opened on. */
+  value: GridCellValue
+  /** The keystroke that opened it, when typing is what opened it. */
+  initialText: string | undefined
+  /** What opened it: a printable key, `F2`, a double-click, or a slot's `edit()`. */
+  source: 'type' | 'key' | 'dblclick' | 'slot'
+}
+
+/** `edit-end`: that editor closed. */
+export interface GridEditEnd {
+  row: number
+  col: number
+  /** The column's `key`. */
+  key: string
+  /** The draft as the editor closed — the value that was written, if any. */
+  value: GridCellValue
+  /** False when the edit was abandoned with `Escape`. */
+  committed: boolean
+  /**
+   * True only when the write landed: a committed edit that matched the stored
+   * value, or one refused by a read-only rule, reports false — and raises no
+   * `cell-change` either.
+   */
+  changed: boolean
+}
+
+/** `active-change`: the focus box moved. */
+export interface GridActiveChange {
+  /** Where it is now; null once the grid has no rows left to point at. */
+  cell: GridCellRef | null
+  /** Where it was. */
+  previous: GridCellRef | null
+}
+
+/**
+ * Every emitted event again, as one discriminated union — for a caller that
+ * wants a single handler (a log, an undo stack, a dirty flag) instead of ten.
+ *
+ * ```ts
+ * function onEvent(event: GridEvent) {
+ *   if (event.type === 'cell-change') dirty.value = true   // payload is narrowed
+ * }
+ * ```
+ */
+export type GridEvent =
+  | { type: 'cell-change'; payload: GridCellChange }
+  | { type: 'row-move'; payload: GridRowMove }
+  | { type: 'row-insert'; payload: GridRowInsert }
+  | { type: 'row-delete'; payload: GridRowDelete }
+  | { type: 'edit-start'; payload: GridEditStart }
+  | { type: 'edit-end'; payload: GridEditEnd }
+  | { type: 'active-change'; payload: GridActiveChange }
+  | { type: 'selection-change'; payload: GridRange | null }
+  | { type: 'focus'; payload: null }
+  | { type: 'blur'; payload: null }

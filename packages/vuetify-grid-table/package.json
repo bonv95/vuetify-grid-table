@@ -1,6 +1,6 @@
 {
   "name": "vuetify-grid-table",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Spreadsheet-style editable data grid for Vue 3 + Vuetify. Cell-level focus, keyboard navigation, Excel-compatible copy/paste, drag reorder, and text / number / select / autocomplete / date / checkbox cell editors.",
   "keywords": [
     "vue",

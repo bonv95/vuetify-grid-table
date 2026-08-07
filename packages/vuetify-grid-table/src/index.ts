@@ -7,6 +7,7 @@ export { GridTable, GridCellEditor }
 export default GridTable
 
 export type {
+  GridActiveChange,
   GridCellChange,
   GridCellContext,
   GridCellRef,
@@ -14,7 +15,10 @@ export type {
   GridCellValue,
   GridColumn,
   GridColumnType,
+  GridEditEnd,
   GridEditorSlotProps,
+  GridEditStart,
+  GridEvent,
   GridInitialCell,
   GridMenuLabels,
   GridOption,
@@ -22,6 +26,9 @@ export type {
   GridReadonlyRows,
   GridRow,
   GridRowClass,
+  GridRowDelete,
+  GridRowInsert,
+  GridRowMove,
 } from './components/grid-table/types'
 
 /**

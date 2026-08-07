@@ -84,11 +84,14 @@ and the change arrives as `source: 'toggle'`.
 
 A cell renders as plain text until it is edited, so nothing would otherwise say
 that a column drops down a list or opens a calendar. The **Hint** column above
-is shown twice: muted in the header, so the whole table can be scanned at a
-glance, and again in the focused cell in the theme's primary colour — the way
-Excel marks a cell with data validation. `text` and `number` get none (a text
-box is the assumption, and numbers read as numbers from their alignment), and a
-checkbox already draws itself.
+is drawn in the focused cell, in the theme's primary colour — the way Excel marks
+a cell with data validation, and where the hint is actually wanted: on the cell
+you are about to type into. Headers stay text-only. `text` and `number` get no
+icon (a text box is the assumption, and numbers read as numbers from their
+alignment), and a checkbox already draws itself.
+
+The icon overlays the tail of the cell's text rather than reserving width, so
+nothing reflows as the focus box moves.
 
 Turn the icons off table-wide with `:type-icons="false"`, or per column with
 `typeIcon: false`. Any mdi name works as an override, which is useful for a text
@@ -148,7 +151,7 @@ fields on a column override them for that column.
 | `defaultColumnWidth`          | `160`     | Width for columns that set none                      |
 | `enterDirection`              | `'down'`  | Where Enter goes: `'down'` or `'right'`              |
 | `headerStyle` / `headerClass` | —         | Applied to every header cell                         |
-| `typeIcons`                   | `true`    | Icon per column advertising its editor               |
+| `typeIcons`                   | `true`    | Hint icon on the focused cell, per column type       |
 | `contextMenu`                 | `true`    | Right-click menu (insert / copy / delete row)        |
 | `menuLabels`                  | English   | Wording for that menu                                |
 | `rowClass`                    | —         | Class(es) per row: string, array, or `(row, i) => …`  |
@@ -221,11 +224,73 @@ merely brought to the container's edge.
 
 ## Events
 
-- `@cell-change` — `{ row, col, key, value, item, source }` where `source` is
-  `'edit' | 'paste' | 'clear' | 'toggle'`.
-- `@row-move` — `{ from, to }` after a drag reorder.
-- `@row-insert` — `{ index }` after a menu insert.
-- `@row-delete` — `{ from, to }` after a menu delete.
+| Event               | Payload            | Fires                                                                                 |
+| ------------------- | ------------------ | ------------------------------------------------------------------------------------- |
+| `@cell-change`      | `GridCellChange`   | A cell was written. One per cell, so a paste raises several                            |
+| `@edit-start`       | `GridEditStart`    | An editor opened on a cell                                                            |
+| `@edit-end`         | `GridEditEnd`      | That editor closed, committed or abandoned                                            |
+| `@row-move`         | `GridRowMove`      | A row was dragged to a new index                                                      |
+| `@row-insert`       | `GridRowInsert`    | The menu inserted a row                                                               |
+| `@row-delete`       | `GridRowDelete`    | The menu deleted a span of rows                                                       |
+| `@active-change`    | `GridActiveChange` | The focus box moved                                                                   |
+| `@selection-change` | `GridRange \| null` | The selection rectangle changed                                                        |
+| `@focus`            | —                  | The grid took keyboard focus                                                          |
+| `@blur`             | —                  | …and lost it, after any open editor was committed                                     |
+| `@event`            | `GridEvent`        | Every one of the above again, as `{ type, payload }`                                  |
+
+Rows themselves arrive through `v-model` — every mutation replaces the array, so
+a watcher on it is enough to persist or diff. These events are for what an array
+cannot tell you: *which* cell changed and *why*, where the focus box is, and what
+a delete took away.
+
+```ts
+// { row, col, key, value, item, source }
+// source: 'edit' | 'paste' | 'clear' | 'toggle'  — useful for batching undo entries
+function onCellChange(change: GridCellChange) { … }
+```
+
+- `GridEditStart` — `{ row, col, key, value, initialText, source }`. `value` is
+  the stored value the editor opened on; `source` is `'type' | 'key'` (`F2`) `|
+  'dblclick' | 'slot'`. A `checkbox` column never opens an editor — the gesture
+  toggles it, so it raises `cell-change` alone.
+- `GridEditEnd` — `{ row, col, key, value, committed, changed }`. `committed` is
+  false for `Escape`; `changed` is true only when the write actually landed, so a
+  commit that matched the stored value — or one a read-only rule refused — reads
+  false, and raised no `cell-change` either.
+- `GridRowMove` — `{ from, to, item }`.
+- `GridRowInsert` — `{ index, item }`, the row `createRow` built.
+- `GridRowDelete` — `{ from, to, items }`. The rows are already out of the
+  `v-model` by the time this arrives, so `items` is the only copy left — which is
+  what makes an undo possible.
+- `GridActiveChange` — `{ cell, previous }`, each a `{ row, col }` or null.
+
+`active-change` and `selection-change` fire on every arrow key, so keep those two
+handlers cheap. Neither repeats itself: re-clicking the cell you are already on
+is silent.
+
+### One handler instead of ten
+
+`@event` repeats every event above as `{ type, payload }`, raised immediately
+after the dedicated one — never instead of it. `GridEvent` is a discriminated
+union, so checking `type` narrows `payload` with no cast:
+
+```ts
+import type { GridEvent, GridRow } from 'vuetify-grid-table'
+
+const deleted = ref<{ from: number; items: GridRow[] }[]>([])
+
+function onEvent(event: GridEvent) {
+  if (event.type === 'cell-change' || event.type.startsWith('row-')) dirty.value = true
+  if (event.type === 'row-delete') deleted.value.push(event.payload)   // payload is GridRowDelete
+}
+```
+
+```vue
+<GridTable v-model="rows" :columns="columns" @event="onEvent" />
+```
+
+Use it for the cross-cutting jobs — an audit log, an undo stack, a dirty flag —
+and the dedicated events for anything that only cares about one thing.
 
 ## Slots
 
@@ -391,6 +456,9 @@ And the types, for annotating your own columns, handlers and slot wrappers:
 import type {
   GridColumn, GridColumnType, GridOption, GridRow, GridCellValue,
   GridCellChange,                          // the @cell-change payload
+  GridEditStart, GridEditEnd,              // @edit-start / @edit-end
+  GridRowMove, GridRowInsert, GridRowDelete, GridActiveChange,
+  GridEvent,                               // the @event union: { type, payload }
   GridCellRef, GridRange,                  // { row, col } and { r1, c1, r2, c2 }
   GridCellSlotProps, GridEditorSlotProps,  // what the cell / editor slots hand you
   GridCellContext,                         // the cellReadonly argument

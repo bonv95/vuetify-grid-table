@@ -37,19 +37,26 @@ import {
   toClipboardText,
 } from './format.js'
 import type {
+  GridActiveChange,
   GridCellChange,
   GridCellContext,
   GridCellRef,
   GridCellSlotProps,
   GridCellValue,
   GridColumn,
+  GridEditEnd,
   GridEditorSlotProps,
+  GridEditStart,
+  GridEvent,
   GridInitialCell,
   GridMenuLabels,
   GridRange,
   GridReadonlyRows,
   GridRow,
   GridRowClass,
+  GridRowDelete,
+  GridRowInsert,
+  GridRowMove,
 } from './types.js'
 
 const props = withDefaults(
@@ -72,7 +79,10 @@ const props = withDefaults(
     headerStyle?: CSSProperties
     /** Class(es) applied to every header cell. */
     headerClass?: string
-    /** Advertise each column's editor with an icon. Per column: `typeIcon`. */
+    /**
+     * Advertise a column's editor with an icon on the focused cell. Per column:
+     * `typeIcon`.
+     */
     typeIcons?: boolean
     /** Right-click menu with insert / delete / copy row. */
     contextMenu?: boolean
@@ -134,11 +144,53 @@ const props = withDefaults(
 const rows = defineModel<GridRow[]>({ required: true })
 
 const emit = defineEmits<{
+  /** A cell was written — by an edit, a paste, a clear or a checkbox toggle. */
   'cell-change': [change: GridCellChange]
-  'row-move': [payload: { from: number; to: number }]
-  'row-insert': [payload: { index: number }]
-  'row-delete': [payload: { from: number; to: number }]
+  /** A row was dragged to a new index. */
+  'row-move': [payload: GridRowMove]
+  /** A row was inserted from the right-click menu. */
+  'row-insert': [payload: GridRowInsert]
+  /** A span of rows was deleted from that menu; carries the rows themselves. */
+  'row-delete': [payload: GridRowDelete]
+  /** An editor opened on a cell — typing, `F2`, a double-click or a slot's `edit()`. */
+  'edit-start': [event: GridEditStart]
+  /** That editor closed, committed or abandoned. */
+  'edit-end': [event: GridEditEnd]
+  /** The focus box moved to another cell. */
+  'active-change': [event: GridActiveChange]
+  /** The selection rectangle changed; null once there is nothing selected. */
+  'selection-change': [range: GridRange | null]
+  /** The grid took keyboard focus. */
+  focus: []
+  /** …and lost it — after any pending edit was committed. */
+  blur: []
+  /**
+   * Every one of the above, again, as `{ type, payload }` — for a caller that
+   * wants one handler (a log, an undo stack, a dirty flag) instead of ten.
+   * Raised immediately after the dedicated event, never instead of it.
+   */
+  event: [event: GridEvent]
 }>()
+
+/**
+ * Raise one event twice: the dedicated one, then the aggregate `event`.
+ *
+ * The cast is deliberate and contained. `GridEvent` is what keeps the name and
+ * the payload in step — Vue's generated `emit` signature is a union of
+ * overloads, which cannot be resolved against a name that is still generic
+ * here, so calling it needs one loose call site rather than ten typed wrappers.
+ */
+function raise<K extends GridEvent['type']>(
+  type: K,
+  payload: Extract<GridEvent, { type: K }>['payload'],
+) {
+  const emitAny = emit as (name: string, ...args: unknown[]) => void
+  // `focus` / `blur` carry nothing, so they must not be handed a payload —
+  // their listeners take no arguments.
+  if (payload === null && (type === 'focus' || type === 'blur')) emitAny(type)
+  else emitAny(type, payload)
+  emitAny('event', { type, payload })
+}
 
 /**
  * Render overrides. Each pair is "one column" plus "every column": a
@@ -206,6 +258,33 @@ const selection = computed<GridRange | null>(() => {
   }
 })
 
+// Reported from watchers rather than from every `setActive` call site, so a
+// gesture that lands on the cell it started from stays silent: both refs are
+// replaced wholesale on each write, so identity says nothing about whether
+// anything moved. The previous value is kept by hand — Vue hands the watcher an
+// old value that is the same object here.
+let lastActive: GridCellRef | null = null
+
+watch(active, (cell) => {
+  if (cell?.row === lastActive?.row && cell?.col === lastActive?.col) return
+  const previous = lastActive
+  lastActive = cell ? { ...cell } : null
+  raise('active-change', { cell: lastActive && { ...lastActive }, previous })
+})
+
+let lastSelection: GridRange | null = null
+
+watch(selection, (range) => {
+  const same =
+    range?.r1 === lastSelection?.r1 &&
+    range?.r2 === lastSelection?.r2 &&
+    range?.c1 === lastSelection?.c1 &&
+    range?.c2 === lastSelection?.c2
+  if (same) return
+  lastSelection = range && { ...range }
+  raise('selection-change', range && { ...range })
+})
+
 // --- Editing ---------------------------------------------------------------
 const editing = ref(false)
 const draft = ref<string | number | boolean | null>(null)
@@ -254,9 +333,11 @@ function headerClassFor(column: GridColumn) {
 
 // --- Editor hints ----------------------------------------------------------
 // Cells render as plain text until they are edited, so nothing tells you a
-// column drops down a list or opens a calendar. These icons say so up front:
-// once in the header, for scanning the table, and again in the focused cell,
-// the way Excel marks a cell with data validation.
+// column drops down a list or opens a calendar. This icon says so, on the
+// focused cell and nowhere else — the way Excel marks a cell with data
+// validation. Deliberately not in the header too: the header is read once, the
+// hint is needed at the cell you are about to type into, and duplicating it
+// there only spent width every column had to reserve.
 //
 // `text` and `number` get none — a text box is the assumption, and `number`
 // already reads as one from its alignment. A checkbox draws itself.
@@ -449,13 +530,17 @@ function moveBy(direction: 'down' | 'up' | 'right' | 'left' | 'none') {
 }
 
 // --- Writing values --------------------------------------------------------
-/** Apply a batch of cell writes as a single immutable rows replacement. */
+/**
+ * Apply a batch of cell writes as a single immutable rows replacement. Returns
+ * the changes it actually made — writes that hit a read-only rule, or that
+ * matched the stored value, are dropped and reported by their absence.
+ */
 function applyChanges(
   updates: Array<{ row: number; col: number; value: string | number | boolean | null }>,
   source: GridCellChange['source'],
   extraRows: GridRow[] = [],
-) {
-  if (!updates.length && !extraRows.length) return
+): GridCellChange[] {
+  if (!updates.length && !extraRows.length) return []
 
   const next = rows.value.slice().concat(extraRows)
   const changed: GridCellChange[] = []
@@ -477,22 +562,29 @@ function applyChanges(
     })
   }
 
-  if (!changed.length && !extraRows.length) return
+  if (!changed.length && !extraRows.length) return changed
   rows.value = next
-  for (const change of changed) emit('cell-change', change)
+  for (const change of changed) raise('cell-change', change)
+  return changed
 }
 
+/** Write one cell. Returns false when nothing was written. */
 function setCellValue(
   row: number,
   col: number,
   value: string | number | boolean | null,
   source: GridCellChange['source'] = 'edit',
-) {
-  applyChanges([{ row, col, value }], source)
+): boolean {
+  return applyChanges([{ row, col, value }], source).length > 0
 }
 
 // --- Edit lifecycle --------------------------------------------------------
-function beginEdit(text?: string) {
+/**
+ * `source` is only ever reported on `edit-start`; the grid itself treats every
+ * way in identically. A checkbox never opens an editor, so the toggle path
+ * below raises `cell-change` and nothing else.
+ */
+function beginEdit(text?: string, source: GridEditStart['source'] = 'key') {
   const cell = active.value
   if (!cell || editing.value) return
   const column = props.columns[cell.col]
@@ -515,6 +607,14 @@ function beginEdit(text?: string) {
   editorMenuOpen.value = false
   editing.value = true
   watchListEditorKeys(isListColumn(column))
+  raise('edit-start', {
+    row: cell.row,
+    col: cell.col,
+    key: column.key,
+    value: current,
+    initialText: text,
+    source,
+  })
   void focusEditor()
 }
 
@@ -552,8 +652,21 @@ function commitEdit(move: 'down' | 'up' | 'right' | 'left' | 'none', refocus = t
   const cell = active.value
   if (!cell || !editing.value) return
   const column = props.columns[cell.col]
-  if (column) setCellValue(cell.row, cell.col, normalizeDraft(column, draft.value), 'edit')
+  const value = column ? normalizeDraft(column, draft.value) : null
+  const changed = column ? setCellValue(cell.row, cell.col, value, 'edit') : false
   stopEdit(refocus)
+  // Before the move, so `edit-end` and the `active-change` it causes arrive in
+  // the order they happened.
+  if (column) {
+    raise('edit-end', {
+      row: cell.row,
+      col: cell.col,
+      key: column.key,
+      value,
+      committed: true,
+      changed,
+    })
+  }
   moveBy(move)
 }
 
@@ -568,7 +681,21 @@ function onEditorPick() {
 }
 
 function cancelEdit() {
+  const cell = active.value
+  if (!cell || !editing.value) return
+  const column = props.columns[cell.col]
+  const value = draft.value
   stopEdit()
+  if (column) {
+    raise('edit-end', {
+      row: cell.row,
+      col: cell.col,
+      key: column.key,
+      value,
+      committed: false,
+      changed: false,
+    })
+  }
 }
 
 // --- Slot payloads ---------------------------------------------------------
@@ -592,7 +719,7 @@ function cellSlotProps(
     editable: isCellEditable(rowIndex, colIndex),
     edit: () => {
       setActive({ row: rowIndex, col: colIndex })
-      beginEdit()
+      beginEdit(undefined, 'slot')
     },
     setValue: (value) => setCellValue(rowIndex, colIndex, value),
   }
@@ -721,19 +848,23 @@ const menuHasReadonlyRow = computed(() => {
 
 function insertRow(at: number) {
   const index = Math.min(Math.max(at, 0), rows.value.length)
+  const item = blankRow()
   const next = rows.value.slice()
-  next.splice(index, 0, blankRow())
+  next.splice(index, 0, item)
   rows.value = next
-  emit('row-insert', { index })
+  raise('row-insert', { index, item })
   setActive({ row: index, col: active.value?.col ?? 0 })
   focusWrapper()
 }
 
 function deleteRows() {
   const { from, to } = menuRows.value
+  // Kept before the filter: once the rows are out of the model this is the only
+  // copy left, and an undo stack needs it.
+  const items = rows.value.slice(from, to + 1)
   const next = rows.value.filter((_, index) => index < from || index > to)
   rows.value = next
-  emit('row-delete', { from, to })
+  raise('row-delete', { from, to, items })
   if (!next.length) {
     active.value = null
     anchor.value = null
@@ -894,14 +1025,14 @@ function onKeydown(event: KeyboardEvent) {
   // editor empty so composition continues there; the triggering key itself is
   // lost, which is why F2 / double-click stay the reliable way in.
   if (event.key === 'Process' || event.keyCode === 229) {
-    beginEdit('')
+    beginEdit('', 'type')
     return
   }
 
   // Any printable character starts an edit seeded with that character.
   if (!mod && !event.altKey && event.key.length === 1) {
     event.preventDefault()
-    beginEdit(event.key)
+    beginEdit(event.key, 'type')
   }
 }
 
@@ -1072,7 +1203,7 @@ function finishRowDrag() {
   const [moved] = next.splice(from, 1)
   next.splice(to, 0, moved)
   rows.value = next
-  emit('row-move', { from, to })
+  raise('row-move', { from, to, item: moved })
 
   // Follow the row that moved.
   anchor.value = { row: to, col: 0 }
@@ -1094,20 +1225,27 @@ function rowClasses(row: GridRow, index: number) {
 
 // --- Focus tracking --------------------------------------------------------
 function onFocusIn() {
+  // `focusin` fires again for every element focused inside the grid — an editor
+  // opening, a menu closing — so only the crossing into the grid is an event.
+  const gained = !hasFocus.value
   hasFocus.value = true
   // Reached by Tab with nothing selected yet: land on the first cell, so the
   // arrow keys do something. Without this the grid can hold keyboard focus and
   // still ignore every keystroke, and a click would be the only way in.
   if (!active.value && rows.value.length && props.columns.length) setActive({ row: 0, col: 0 })
+  if (gained) raise('focus', null)
 }
 
 function onFocusOut(event: FocusEvent) {
   const next = event.relatedTarget as HTMLElement | null
   // Vuetify menus are teleported outside the grid; that is still "inside".
   if (next && (wrapperRef.value?.contains(next) || next.closest('.v-overlay-container'))) return
+  const lost = hasFocus.value
   hasFocus.value = false
   // Leaving the grid mid-edit keeps the value, like clicking away in Excel.
   if (editing.value) commitEdit('none', false)
+  // After that commit, so a caller saving on `blur` sees the last edit.
+  if (lost) raise('blur', null)
 }
 
 defineExpose({ active, selection, focusCell, isCellEditable })
@@ -1171,16 +1309,7 @@ defineExpose({ active, selection, focusCell, isCellEditable })
               :class="[headerClassFor(column), { 'is-resizing': resizingKey === column.key }]"
               :style="headerStyleFor(column)"
             >
-              <span
-                class="grid-head-text"
-                :class="{ 'has-type-icon': typeIconByKey[column.key] }"
-              >{{ column.title }}</span>
-              <v-icon
-                v-if="typeIconByKey[column.key]"
-                class="grid-type-icon"
-                size="13"
-                :icon="typeIconByKey[column.key]"
-              />
+              <span class="grid-head-text">{{ column.title }}</span>
               <span
                 v-if="resizable"
                 class="grid-resizer"
@@ -1239,7 +1368,7 @@ defineExpose({ active, selection, focusCell, isCellEditable })
               :aria-selected="isSelected(rowIndex, colIndex)"
               @mousedown="onCellMouseDown($event, rowIndex, colIndex)"
               @mouseenter="onCellMouseEnter(rowIndex, colIndex)"
-              @dblclick="beginEdit()"
+              @dblclick="beginEdit(undefined, 'dblclick')"
               @contextmenu="onContextMenu($event, rowIndex, colIndex)"
             >
               <template v-if="isEditingCell(rowIndex, colIndex)">
@@ -1416,22 +1545,6 @@ thead th {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-/* Reserve room so a long title ellipsises before it reaches the icon. */
-.grid-head-text.has-type-icon {
-  padding-right: 15px;
-}
-
-/* Absolute rather than inline, so the header keeps its `text-align`. Sits
-   inside the resize grip's 7px, which stays clickable above it. */
-.grid-type-icon {
-  position: absolute;
-  right: 6px;
-  top: 50%;
-  transform: translateY(-50%);
-  opacity: 0.45;
-  pointer-events: none;
 }
 
 /* Row-number / drag gutter, frozen to the left edge. Kept narrow: the whole

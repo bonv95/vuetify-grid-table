@@ -46,14 +46,28 @@ const dateValue = computed(() => toDate(draft.value))
 // `draft` only follows once that text parses. A typo therefore leaves the
 // stored date alone instead of wiping it; clearing the box clears the value.
 const dateText = ref(props.initialText ?? formatDate(draft.value))
-watch(dateText, (text) => {
+
+function syncDraftFromText(text: string) {
   if (!text.trim()) {
     draft.value = null
     return
   }
   const parsed = parseFlexibleDate(text)
   if (parsed) draft.value = parsed
-})
+}
+
+/**
+ * `immediate` whenever a keystroke opened the editor. `dateText` is
+ * *initialised* from that keystroke rather than assigned, and a ref's initial
+ * value is not a change — so without this, `2` followed straight by Enter
+ * committed the old date untouched, while `25` worked because the second
+ * keystroke was a real assignment the watcher could see.
+ *
+ * An empty seed is left alone: that is the IME path (`beginEdit('')`), where
+ * nothing has been typed yet and nulling the draft would turn an abandoned
+ * composition into a delete.
+ */
+watch(dateText, syncDraftFromText, { immediate: !!props.initialText })
 
 onMounted(() => {
   // List editors open their menu immediately, matching Excel's dropdown feel.

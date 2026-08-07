@@ -45,11 +45,15 @@ cell.
 ### Telling the types apart
 
 Cells render as plain text until edited, so nothing would otherwise say that a
-column drops down a list or opens a calendar. The **Hint** icon appears twice:
-muted in the header, for scanning the table, and in the focused cell in the
-primary colour — the way Excel marks a cell with data validation. Off table-wide
-with `:type-icons="false"`, per column with `typeIcon: false`; any mdi name
-overrides it (`typeIcon: 'mdi-email-outline'`).
+column drops down a list or opens a calendar. The **Hint** icon is drawn on the
+focused cell only, in the primary colour — the way Excel marks a cell with data
+validation. Headers stay text-only: the hint belongs at the cell about to be
+typed into, and a header copy cost every column the width it had to reserve for
+it. Off table-wide with `:type-icons="false"`, per column with
+`typeIcon: false`; any mdi name overrides it (`typeIcon: 'mdi-email-outline'`).
+
+It is absolutely positioned over the text's tail rather than laid out, so the
+focus box moving from cell to cell reflows nothing.
 
 ### Date shorthand
 
@@ -106,7 +110,7 @@ fields on a column override them for that column.
 | `defaultColumnWidth` | `160` | Width for columns that set none               |
 | `enterDirection` | `'down'` | Where Enter goes: `'down'` or `'right'`        |
 | `headerStyle` / `headerClass` | — | Applied to every header cell         |
-| `typeIcons`      | `true`  | Icon per column advertising its editor          |
+| `typeIcons`      | `true`  | Hint icon on the focused cell, per column type  |
 | `contextMenu`    | `true`  | Right-click menu (insert / copy / delete row)   |
 | `menuLabels`     | English | Wording for that menu                           |
 | `rowClass`       | —       | Class(es) per row: string, array, or `(row, i) => …` |
@@ -163,11 +167,38 @@ and keeps the cell clear of the sticky header and frozen gutter.
 
 ## Events
 
-- `@cell-change` — `{ row, col, key, value, item, source }` where `source` is
-  `'edit' | 'paste' | 'clear' | 'toggle'`.
-- `@row-move` — `{ from, to }` after a drag reorder.
-- `@row-insert` — `{ index }` after a menu insert.
-- `@row-delete` — `{ from, to }` after a menu delete.
+Rows go out through `v-model` — replaced whole on every mutation. These carry
+what the array cannot say: which cell, why, and what a delete removed.
+
+- `@cell-change` — `GridCellChange`, `{ row, col, key, value, item, source }`
+  where `source` is `'edit' | 'paste' | 'clear' | 'toggle'`. One per cell, so a
+  paste raises several inside a single rows replacement.
+- `@edit-start` — `GridEditStart`, `{ …, value, initialText, source }` with
+  `source` `'type' | 'key' | 'dblclick' | 'slot'`. Raised from `beginEdit`, which
+  is also where the `checkbox` short-circuit lives: a checkbox toggles instead of
+  opening an editor, so it raises `cell-change` alone.
+- `@edit-end` — `GridEditEnd`, `{ …, value, committed, changed }`. `committed` is
+  false only for `cancelEdit`; `changed` comes from `setCellValue`'s return, so a
+  no-op write or a read-only refusal reads false.
+- `@row-move` — `GridRowMove`, `{ from, to, item }`.
+- `@row-insert` — `GridRowInsert`, `{ index, item }`.
+- `@row-delete` — `GridRowDelete`, `{ from, to, items }`. `items` is snapshotted
+  before the filter — nothing else keeps the deleted rows.
+- `@active-change` / `@selection-change` — `GridActiveChange` and
+  `GridRange | null`, both from watchers rather than from the `setActive` call
+  sites: `active` and `anchor` are replaced wholesale on every write, so identity
+  cannot say whether anything moved. The last value is kept by hand and compared
+  by coordinate, which is what keeps a re-click on the current cell silent.
+- `@focus` / `@blur` — the crossings only, not every `focusin` inside the grid.
+  `blur` is raised after the pending edit is committed.
+- `@event` — all of the above again as `{ type, payload }`, through `raise()`,
+  which emits the dedicated event and then the aggregate. `GridEvent` is the
+  discriminated union that keeps the two in step, and the reason `raise()` holds
+  the one loose `emit` cast: Vue's generated signature is a union of overloads
+  and cannot be resolved against a still-generic event name.
+
+Adding an event means adding it to `GridEvent` too, and raising it through
+`raise()` rather than `emit()`, or the aggregate silently misses it.
 
 ## Slots
 

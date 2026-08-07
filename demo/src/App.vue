@@ -1,7 +1,17 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useTheme } from 'vuetify'
-import { GridTable, type GridCellChange, type GridColumn, type GridRow } from 'vuetify-grid-table'
+import {
+  GridTable,
+  type GridActiveChange,
+  type GridCellChange,
+  type GridColumn,
+  type GridEditEnd,
+  type GridEditStart,
+  type GridEvent,
+  type GridRange,
+  type GridRow,
+} from 'vuetify-grid-table'
 
 import { columns, createBlankRow, createRows } from './data'
 
@@ -83,12 +93,89 @@ function show(value: unknown): string {
   return typeof value === 'string' ? `"${value}"` : String(value)
 }
 
+/* --- One handler per event, the usual way -----------------------------------
+ * Each of these is wired straight to its own `@`-listener on the grid below.
+ * `active-change` and `selection-change` fire on every arrow key, so the demo
+ * hides them behind a switch — in an app, keep those two handlers cheap. */
+
 function onCellChange(change: GridCellChange) {
   push(
     'mdi-pencil',
     'primary',
-    `row ${change.row + 1} · ${change.key} → ${show(change.value)}  (${change.source})`,
+    `cell-change   row ${change.row + 1} · ${change.key} → ${show(change.value)}  (${change.source})`,
   )
+}
+
+function onEditStart(event: GridEditStart) {
+  push(
+    'mdi-cursor-text',
+    'info',
+    `edit-start    row ${event.row + 1} · ${event.key} = ${show(event.value)}  (${event.source})`,
+  )
+}
+
+function onEditEnd(event: GridEditEnd) {
+  // Three outcomes worth telling apart: written, committed but identical (or
+  // refused by a read-only rule), and abandoned with Escape.
+  const outcome = event.committed ? (event.changed ? 'written' : 'unchanged') : 'cancelled'
+  push(
+    event.committed ? (event.changed ? 'mdi-check' : 'mdi-equal') : 'mdi-close',
+    event.changed ? 'success' : 'medium-emphasis',
+    `edit-end      row ${event.row + 1} · ${event.key} = ${show(event.value)}  (${outcome})`,
+  )
+}
+
+const logNavigation = ref(false)
+
+function onActiveChange(event: GridActiveChange) {
+  if (!logNavigation.value) return
+  const at = event.cell ? `${event.cell.row + 1},${event.cell.col + 1}` : '∅'
+  const was = event.previous ? `${event.previous.row + 1},${event.previous.col + 1}` : '∅'
+  push('mdi-crosshairs', 'medium-emphasis', `active-change ${was} → ${at}`)
+}
+
+function onSelectionChange(range: GridRange | null) {
+  if (!logNavigation.value) return
+  const text = range
+    ? `r${range.r1 + 1}c${range.c1 + 1}:r${range.r2 + 1}c${range.c2 + 1}` +
+      ` (${(range.r2 - range.r1 + 1) * (range.c2 - range.c1 + 1)} cells)`
+    : 'null'
+  push('mdi-select-all', 'medium-emphasis', `selection-change ${text}`)
+}
+
+/* --- …or one handler for all of them ----------------------------------------
+ * `@event` repeats every event above as `{ type, payload }`, so a log, a dirty
+ * flag or an undo stack needs one listener instead of ten. The `type` check
+ * narrows `payload` — hence `payload.items` below with no cast. */
+
+const seen = ref<Partial<Record<GridEvent['type'], number>>>({})
+const dirty = ref(false)
+const deleted = ref<Array<{ from: number; items: GridRow[] }>>([])
+
+function onEvent(event: GridEvent) {
+  seen.value[event.type] = (seen.value[event.type] ?? 0) + 1
+
+  if (event.type === 'cell-change' || event.type.startsWith('row-')) dirty.value = true
+
+  // `row-delete` carries the rows themselves — they are already out of the
+  // v-model by now, so this is the only copy an undo can put back.
+  if (event.type === 'row-delete') {
+    deleted.value.push({ from: event.payload.from, items: event.payload.items })
+  }
+}
+
+/** Busiest first. `event` itself is never in here — the union does not include it. */
+const seenChips = computed(() =>
+  (Object.entries(seen.value) as Array<[GridEvent['type'], number]>).sort((a, b) => b[1] - a[1]),
+)
+
+function undoDelete() {
+  const last = deleted.value.pop()
+  if (!last) return
+  const next = rows.value.slice()
+  next.splice(last.from, 0, ...last.items)
+  rows.value = next
+  push('mdi-undo', 'info', `restored ${last.items.length} row(s) at ${last.from + 1}`)
 }
 
 const totalAmount = computed(() =>
@@ -100,6 +187,9 @@ const urgentCount = computed(() => rows.value.filter((row) => row.urgent).length
 function reset() {
   rows.value = createRows()
   log.value = []
+  seen.value = {}
+  deleted.value = []
+  dirty.value = false
   push('mdi-refresh', 'medium-emphasis', 'sample data restored')
 }
 
@@ -128,6 +218,112 @@ const columns: GridColumn[] = [
 <template>
   <GridTable v-model="rows" :columns="columns" height="480" @cell-change="onChange" />
 <\/template>`
+
+const eventsSnippet = `<script setup lang="ts">
+import type { GridCellChange, GridEvent, GridRow } from '${PKG}'
+
+/* One listener per event — the payload is typed, so change.source, event.committed
+   and payload.items all narrow without a cast. */
+function onCellChange(change: GridCellChange) {
+  console.log(change.row, change.key, change.value, change.source) // 'edit' | 'paste' | 'clear' | 'toggle'
+}
+
+/* Or one listener for all of them: @event repeats each one as { type, payload },
+   right after the dedicated event — never instead of it. */
+const dirty = ref(false)
+const deleted = ref<{ from: number; items: GridRow[] }[]>([])
+
+function onEvent(event: GridEvent) {
+  if (event.type === 'cell-change' || event.type.startsWith('row-')) dirty.value = true
+
+  // row-delete carries the rows themselves — they are out of v-model already,
+  // so this is the only copy an undo can put back.
+  if (event.type === 'row-delete') deleted.value.push(event.payload)
+}
+<\/script>
+
+<template>
+  <GridTable
+    v-model="rows"
+    :columns="columns"
+    @cell-change="onCellChange"
+    @edit-start="({ key, source }) => console.log('editing', key, 'via', source)"
+    @edit-end="({ committed, changed }) => console.log(committed, changed)"
+    @row-move="({ from, to }) => console.log(from, '→', to)"
+    @row-insert="({ index, item }) => console.log('inserted', item, 'at', index)"
+    @row-delete="({ items }) => console.log('deleted', items.length)"
+    @active-change="({ cell }) => (statusBar = cell)"
+    @selection-change="(range) => (sum = total(range))"
+    @focus="hint = true"
+    @blur="save()"
+    @event="onEvent"
+  />
+<\/template>`
+
+/** `fields` renders as code, `text` as prose — hence no backticks in either. */
+const events = [
+  {
+    name: 'cell-change',
+    payload: 'GridCellChange',
+    fields: '{ row, col, key, value, item, source }',
+    text: 'A cell was written. source tells an edit from a paste, a Delete or a checkbox toggle. One per cell, so a paste raises several.',
+  },
+  {
+    name: 'edit-start',
+    payload: 'GridEditStart',
+    fields: '{ row, col, key, value, initialText, source }',
+    text: 'An editor opened, where source is type / key (F2) / dblclick / slot. A checkbox never opens one — it toggles instead.',
+  },
+  {
+    name: 'edit-end',
+    payload: 'GridEditEnd',
+    fields: '{ row, col, key, value, committed, changed }',
+    text: 'It closed. committed is false for Escape; changed is true only when the write landed, so an identical — or read-only-refused — value reads false.',
+  },
+  {
+    name: 'row-move',
+    payload: 'GridRowMove',
+    fields: '{ from, to, item }',
+    text: 'A row was dragged to a new index.',
+  },
+  {
+    name: 'row-insert',
+    payload: 'GridRowInsert',
+    fields: '{ index, item }',
+    text: 'The right-click menu inserted a row — the one createRow built.',
+  },
+  {
+    name: 'row-delete',
+    payload: 'GridRowDelete',
+    fields: '{ from, to, items }',
+    text: 'Rows were deleted. They are already out of the v-model, so items is the only copy left — and the one thing an undo needs.',
+  },
+  {
+    name: 'active-change',
+    payload: 'GridActiveChange',
+    fields: '{ cell, previous }',
+    text: 'The focus box moved. Fires per arrow key, so keep the handler cheap; re-clicking the cell you are on is silent.',
+  },
+  {
+    name: 'selection-change',
+    payload: 'GridRange | null',
+    fields: '{ r1, c1, r2, c2 }',
+    text: 'The selection rectangle changed, inclusive on both corners. Also per keystroke while Shift-extending.',
+  },
+  { name: 'focus', payload: '—', fields: '', text: 'The grid took keyboard focus.' },
+  {
+    name: 'blur',
+    payload: '—',
+    fields: '',
+    text: 'It lost focus, after any open editor was committed — so a save here sees the last edit.',
+  },
+  {
+    name: 'event',
+    payload: 'GridEvent',
+    fields: '{ type, payload }',
+    text: 'Every one of the above again, raised right after the dedicated event and never instead of it. For a log, an undo stack or a dirty flag.',
+  },
+]
 
 const cellTypes = [
   { type: 'text', icon: null, editor: 'v-text-field', stored: 'string', note: 'The default when no type is set.' },
@@ -317,9 +513,16 @@ const shortcuts = [
             item-key="id"
             :row-class="(row) => (row.urgent ? 'demo-row-urgent' : undefined)"
             @cell-change="onCellChange"
-            @row-move="({ from, to }) => push('mdi-swap-vertical', 'info', `row ${from + 1} → ${to + 1}`)"
-            @row-insert="({ index }) => push('mdi-plus', 'success', `row inserted at ${index + 1}`)"
-            @row-delete="({ from, to }) => push('mdi-delete', 'error', `rows ${from + 1}–${to + 1} deleted`)"
+            @edit-start="onEditStart"
+            @edit-end="onEditEnd"
+            @active-change="onActiveChange"
+            @selection-change="onSelectionChange"
+            @row-move="({ from, to }) => push('mdi-swap-vertical', 'info', `row-move      row ${from + 1} → ${to + 1}`)"
+            @row-insert="({ index }) => push('mdi-plus', 'success', `row-insert    at row ${index + 1}`)"
+            @row-delete="({ from, to, items }) => push('mdi-delete', 'error', `row-delete    rows ${from + 1}–${to + 1} (${items.length} kept for undo)`)"
+            @focus="push('mdi-login-variant', 'medium-emphasis', 'focus')"
+            @blur="push('mdi-logout-variant', 'medium-emphasis', 'blur')"
+            @event="onEvent"
           />
 
           <v-divider />
@@ -335,6 +538,25 @@ const shortcuts = [
               <v-icon icon="mdi-lock-outline" size="14" class="mr-1" />
               <strong>{{ lockedRowCount }}</strong> locked rows
             </span>
+            <v-spacer />
+            <!-- Both of these are maintained by the single `@event` handler. -->
+            <v-chip
+              :color="dirty ? 'warning' : undefined"
+              size="small"
+              variant="tonal"
+              :prepend-icon="dirty ? 'mdi-content-save-alert-outline' : 'mdi-check-circle-outline'"
+            >
+              {{ dirty ? 'unsaved changes' : 'no changes yet' }}
+            </v-chip>
+            <v-btn
+              size="small"
+              variant="tonal"
+              prepend-icon="mdi-undo"
+              :disabled="!deleted.length"
+              @click="undoDelete"
+            >
+              Undo delete{{ deleted.length > 1 ? ` (${deleted.length})` : '' }}
+            </v-btn>
           </div>
         </v-card>
 
@@ -343,6 +565,14 @@ const shortcuts = [
           <v-toolbar density="comfortable" color="transparent">
             <v-toolbar-title class="text-subtitle-1 font-weight-bold">Emitted events</v-toolbar-title>
             <v-spacer />
+            <v-switch
+              v-model="logNavigation"
+              label="Log navigation"
+              density="compact"
+              hide-details
+              color="primary"
+              class="flex-grow-0 mr-4"
+            />
             <v-btn
               size="small"
               variant="text"
@@ -354,12 +584,32 @@ const shortcuts = [
             </v-btn>
           </v-toolbar>
           <v-divider />
-          <v-list density="compact" max-height="260" class="overflow-y-auto py-0">
+
+          <!-- The tally below is built entirely by the single `@event` handler:
+               one listener, every event, narrowed on `type`. -->
+          <div class="d-flex flex-wrap align-center ga-2 px-4 py-3">
+            <span class="text-caption text-medium-emphasis mr-1">
+              seen by the one <code>@event</code> handler:
+            </span>
+            <span v-if="!seenChips.length" class="text-caption text-disabled">nothing yet</span>
+            <v-chip
+              v-for="[type, count] in seenChips"
+              :key="type"
+              size="x-small"
+              variant="tonal"
+              label
+            >
+              {{ type }} <strong class="ml-1">{{ count }}</strong>
+            </v-chip>
+          </div>
+          <v-divider />
+
+          <v-list density="compact" max-height="300" class="overflow-y-auto py-0">
             <v-list-item v-if="!log.length" class="text-medium-emphasis">
               <template #prepend>
                 <v-icon icon="mdi-gesture-tap" class="mr-2" />
               </template>
-              Edit something above and the events land here.
+              Edit, drag or right-click something above and the events land here.
             </v-list-item>
             <v-list-item v-for="entry in log" :key="entry.id">
               <template #prepend>
@@ -368,6 +618,46 @@ const shortcuts = [
               <span class="text-body-2 font-monospace">{{ entry.text }}</span>
             </v-list-item>
           </v-list>
+        </v-card>
+
+        <!-- Events reference -->
+        <v-card border flat class="mb-8">
+          <v-card-title class="text-subtitle-1 font-weight-bold">Events</v-card-title>
+          <v-divider />
+          <v-table density="compact">
+            <thead>
+              <tr>
+                <th style="width: 170px">Event</th>
+                <th style="width: 250px">Payload</th>
+                <th>Fires when</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="item in events" :key="item.name">
+                <td><code>@{{ item.name }}</code></td>
+                <td>
+                  <code v-if="item.payload !== '—'">{{ item.payload }}</code>
+                  <span v-else class="text-disabled">—</span>
+                  <div v-if="item.fields" class="text-caption text-medium-emphasis">
+                    <code>{{ item.fields }}</code>
+                  </div>
+                </td>
+                <td class="text-medium-emphasis py-2" style="white-space: normal">
+                  {{ item.text }}
+                </td>
+              </tr>
+            </tbody>
+          </v-table>
+          <v-divider />
+          <v-card-text>
+            <pre class="demo-code"><code>{{ eventsSnippet }}</code></pre>
+            <p class="text-body-2 text-medium-emphasis mt-4 mb-0">
+              Rows themselves arrive through <code>v-model</code> — every mutation replaces the
+              array, so a watcher on it is enough to persist or diff. These events are for the
+              things an array cannot tell you: <em>which</em> cell changed and <em>why</em>, where
+              the focus box is, and what a delete took away.
+            </p>
+          </v-card-text>
         </v-card>
 
         <!-- Reference -->
@@ -380,7 +670,7 @@ const shortcuts = [
                 <thead>
                   <tr>
                     <th>type</th>
-                    <th>Hint</th>
+                    <th>Hint on focus</th>
                     <th>Editor</th>
                     <th>Stored value</th>
                   </tr>

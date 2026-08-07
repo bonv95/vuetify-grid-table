@@ -4,6 +4,81 @@ Notable changes to **vuetify-grid-table**. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versions follow
 [semver](https://semver.org/).
 
+## 0.1.5 — 2026-08-07
+
+Additive: nothing in 0.1.4 changes meaning, and no prop, event or payload field
+was removed or renamed. Every existing listener keeps working — the three row
+events gained a field each. Two visible differences are noted under *Changed*.
+
+### Added
+
+- **Six more events**, so the grid reports what it is doing and not only what it
+  changed:
+
+  - `@edit-start` (`GridEditStart`) — an editor opened. `{ row, col, key, value,
+    initialText, source }`, where `source` is `'type' | 'key'` (`F2`) `|
+    'dblclick' | 'slot'`. A `checkbox` column raises none: the gesture toggles it
+    instead of opening an editor.
+  - `@edit-end` (`GridEditEnd`) — it closed. `{ …, value, committed, changed }`.
+    `committed` is false for `Escape`; `changed` is true only when the write
+    landed, so a commit matching the stored value — or one a read-only rule
+    refused — reads false, and raised no `cell-change` either.
+  - `@active-change` (`GridActiveChange`) — the focus box moved,
+    `{ cell, previous }`.
+  - `@selection-change` (`GridRange | null`) — the selection rectangle changed.
+  - `@focus` / `@blur` — the grid took or lost keyboard focus. `blur` arrives
+    *after* any open editor was committed, so a save there sees the last edit.
+
+  Neither `active-change` nor `selection-change` repeats itself: re-clicking the
+  cell you are already on is silent. Both fire per arrow key, so keep those two
+  handlers cheap.
+
+- **`@event`** (`GridEvent`) — every event above *again*, as
+  `{ type, payload }`, raised immediately after the dedicated one and never
+  instead of it. `GridEvent` is a discriminated union, so checking `type` narrows
+  `payload` with no cast. For the cross-cutting jobs — an audit log, an undo
+  stack, a dirty flag — that would otherwise need ten listeners.
+
+- **`GridRowDelete.items`** — the deleted rows themselves, in order. They are out
+  of the `v-model` by the time the event arrives, so this is the only copy left,
+  and the one thing an undo needs.
+
+- **`GridRowInsert.item`** and **`GridRowMove.item`** — the row that was inserted
+  (as `createRow` built it) and the row that moved.
+
+- **Exported types** for all of it: `GridEvent`, `GridEditStart`, `GridEditEnd`,
+  `GridActiveChange`, `GridRowMove`, `GridRowInsert`, `GridRowDelete`. The three
+  row payloads used to be inline object types with no name to import.
+
+### Changed
+
+- **The type icon is gone from the header.** It now appears on the focused cell
+  only — where the hint is actually wanted, on the cell about to be typed into.
+  The header copy was read once and then cost every column of those types the
+  15px of title width it had to reserve for it. `typeIcons` and `typeIcon` are
+  unchanged and still govern the cell hint.
+
+- `@focus` and `@blur` are **declared events** now, so they no longer fall
+  through to the wrapper `<div>` as native listeners. The difference is small and
+  in the right direction: a native `focus` fired only when the wrapper itself was
+  focused, and fired again on every trip through it, while the declared event
+  marks the crossing into and out of the grid — an editor taking focus, or a
+  teleported Vuetify menu, is still "inside".
+
+### Fixed
+
+- **A single keystroke into a date cell was thrown away.** Typing `2` and
+  pressing `Enter` committed the old date untouched, while `25` worked — the
+  editor's text ref is *initialised* from the opening keystroke rather than
+  assigned, and a ref's initial value is not a change, so the watcher that parses
+  the text into the draft never ran until a second character arrived. It now runs
+  for the seeded text too, so `2` stores the 2nd of the current month as it always
+  should have. The IME path (which opens the editor with an empty seed) is
+  untouched, so an abandoned composition still leaves the date alone.
+
+  The calendar benefits as well: typing `3` and then opening the picker now opens
+  it on the month you typed rather than the month you replaced.
+
 ## 0.1.4 — 2026-07-29
 
 Additive: nothing in 0.1.3 changes meaning, and no prop or event was removed or

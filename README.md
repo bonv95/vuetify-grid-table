@@ -29,13 +29,17 @@ npm install vuetify-grid-table
   keystroke, with no click anywhere.
 - **Six column types** — text, number, select, autocomplete, date, checkbox —
   each backed by the matching Vuetify input, each advertising itself with a hint
-  icon so a cell that opens a list or a calendar looks different from one that
-  doesn't.
+  icon on the focused cell, so a cell that opens a list or a calendar looks
+  different from one that doesn't.
 - **Excel-compatible clipboard.** Copy, cut and paste rectangular ranges as TSV;
   a round trip through a spreadsheet is lossless, and a paste that overruns the
   last row can grow the grid.
 - **Read-only in layers** — table, row, column, cell — so a shipped order can be
   locked without touching the data or the column config.
+- **Ten events** — which cell changed and why, when an editor opened and how it
+  closed, where the focus box is, what a delete took away — plus `@event`, all
+  ten again as one typed union, for an undo stack or a dirty flag that would
+  otherwise need ten listeners.
 - **Slots** for cell display, the editor, and the gutter, per column or across
   the table.
 - **Frozen gutter and fixed header**, drag-to-reorder rows, drag-to-resize
@@ -85,7 +89,7 @@ The version in `packages/vuetify-grid-table/package.json` is the published versi
 ```bash
 npm login                                   # once — tokens do expire
 npm version patch -w vuetify-grid-table     # or minor / major
-git commit -am "Release v0.1.4" && git tag v0.1.4
+git commit -am "Release v0.1.5" && git tag v0.1.5
 npm run release                             # build + publish --access public
 git push --follow-tags
 ```
